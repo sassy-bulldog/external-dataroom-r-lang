@@ -1,0 +1,176 @@
+---
+title: "U/W Folder Data Room Archive"
+author: "Chris Laws"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+params:
+  current_period: "2025Q2"
+  run_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/RunLogs/2025Q2/"
+  output_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/Content/2025Q2/"
+  source_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/TEMP_2025Q2/"
+  archive_directory: "Z:/Shared/Jaffa External/Huggins/Underwriting/Content/"
+  archive_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/Content/"
+  remove_working_files: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Overview
+
+## Purpose
+This script was created to incrementally archive U/W source files in the external data room.
+
+U/W source files generally do not change once they are finalized.
+And so the script builds a view of the the U/W source files by:
+ 1. Referencing files already in the archive
+ 2. Adding new files to the archive
+ 3. Coping any modified files into the archive.
+The script looks to help focus the archive user toward new/modified files while providing easy access to previously existing files.
+
+## Approach
+The script compares the current set of U/W source files to those already in the archive.
+If the (relative) path, file name, last write time, and size already exist in the archive; the file is assumed unchanged.
+Otherwise, the file is assumed to be new/modified and archived file (and associated files) are considered invalid and the current files are added to the archive.
+
+In the event that the file may have existed before, the script tries to summarize what may have changed.
+* The script tries to identify files that have the same (relative) path and name, but may have been modified because the last write time and size have changed.
+* The script tries to identify files that may have been renamed by first comparing the (relative) path, last write time, and size.
+   - If these qualities match, a full file hash is pulled and compared to ensure the contents are consistent between the two files with different names.
+   
+## Helpful Conventions
+- The script associates each collection of files by "segment" and "deal".
+- The script assumes that files are stored in a hierarchical file path with a "./<segment>/<deal>/*" convention.
+- The script *does not* look for files that have been removed. For instance, is the archive has file XYZ.csv associated with Segment A Deal 1 and the current U/W sources files have removed XYZ.csv, file XYZ.csv will not be considered when comparing the current and archived versions of Segment A Deal 1.
+
+The archive structure should consist of:
+1. A Content folder that houses the archived U/W source files. 
+   - The Content folder consists of a series of sub-folders.
+   - Each sub-folder is typically named in a {YYYY}Q{Q} pattern (e.g., 2025Q2) that corresponds the period in which the files were added.
+   - The names *must* sort in R such that max{sub-folder-name} is the most recent.
+2. A RunLogs folder the houses the script, logs, intermediate files, etc. used.
+   - The Content folder consists of a series of sub-folders.
+   - Each sub-folder is typically named in a {YYYY}Q{Q} pattern that corresponds the period in which the files were added.
+3. A series of archive directory files.
+   - Each archive directory file is typically named in a {YYYY}Q{Q}_Directory.csv pattern that corresponds the period in which the files were added.
+ 
+Note that we used powershell to get this info to avoid a max file path limitation of R packages.
+   
+## Output
+The script output is:
+1. A "NEW" folder that contains all "segment"x"deal"(s) that did not previously exist in the archive.
+2. A "MOD" folder that contains all "segment"x"deal"(s) that previously existed in the archive but now have files that did not match the archive.
+3. An archive directory that includes the full set of "segment"x"deal"s and helpful information such as where to locate the current archived copy and a summary of what may have changed for "segment"x"deal"s showing modified files.
+
+Note that two File Directories are created.
+One that references the path relative to the archive staging area; this directory is useful to inspect the output *before* the output is copied into the final archive area.
+The other that references the path relative to the final archive area; this directory is useful to navigate the final archive area.
+
+## Running the Script
+
+### Step 1
+Setup the new staging area/folder structure.
+This can be any new/unused folder. 
+Intermediate files, the script, and output will be initially populated into this staging area.
+The script should be copied into this new staging folder.
+
+### Step 2
+Adjust the values in the YAML parameters section at the top of this document, or pass them when rendering the document.
+
+### Step 3
+Compile a Report of the script.
+(Ctrl-Shift-K in R Studio or use `rmarkdown::render()`)
+The script will deposit the intermediate files, the script, and output into this staging area.
+
+### Step 4
+After the staging area has been manually reviewed, the contents can be manually moved into the archive.
+The NEW and MOD folders in the staging area should be copied into a newly created {YYYY}Q{Q} sub-folder of the Content folder.
+The other files should be copied into a newly created {YYYY}Q{Q} sub-folder of the RunLogs folder.
+The archive directory file should copied into the root of the archive (i.e., the same level as the Content and RunLogs folder).
+
+# Input Parameters
+
+The following parameters are configured for this run:
+
+```{r display-params}
+# Display current parameters
+cat("Current Period:", params$current_period, "\n")
+cat("Run Staging Directory:", params$run_staging_directory, "\n") 
+cat("Output Staging Directory:", params$output_staging_directory, "\n")
+cat("Source Directory:", params$source_directory, "\n")
+cat("Archive Directory:", params$archive_directory, "\n")
+cat("Archive Staging Directory:", params$archive_staging_directory, "\n")
+cat("Remove Working Files:", params$remove_working_files, "\n")
+```
+
+# Initialize R
+
+```{r initialize}
+R.version
+Sys.time()
+
+# Source the underwriting functions
+source("underwriting_functions.R")
+```
+
+# Execute Archive Process
+
+```{r execute-archive}
+# Execute the main archiving function with parameters
+result <- archive_underwriting_files(
+  current_period = params$current_period,
+  run_staging_directory = params$run_staging_directory,
+  output_staging_directory = params$output_staging_directory,
+  source_directory = params$source_directory,
+  archive_directory = params$archive_directory,
+  archive_staging_directory = params$archive_staging_directory,
+  remove_working_files = params$remove_working_files
+)
+```
+
+# Summary Results
+
+```{r summary}
+cat("Archive process completed successfully!\n")
+cat("Current Period:", result$current_period, "\n")
+cat("New Deals Found:", nrow(result$new_deals), "\n")
+cat("Modified Deals Found:", nrow(result$mod_deals), "\n")
+cat("Old Deals (Unchanged):", nrow(result$old_deals), "\n")
+cat("Total Files Copied:", result$files_copied, "\n")
+
+if(nrow(result$new_deals) > 0) {
+  cat("\nNew Deals:\n")
+  print(result$new_deals)
+}
+
+if(nrow(result$mod_deals) > 0) {
+  cat("\nModified Deals:\n")
+  print(result$mod_deals %>% select(segment, deal, n_mod_or_add_files))
+}
+```
+
+# File Operations Log
+
+The script has created the following outputs in the staging directory:
+
+- `{params$current_period}_Staging_Directory.csv`: Directory file for staging area navigation
+- `{params$current_period}_Directory.csv`: Directory file for final archive navigation  
+- `NEW/` folder: Contains newly archived segment/deal combinations
+- `MOD/` folder: Contains modified segment/deal combinations
+- Various intermediate files (`RAW_INFO_*.txt`, `hash.txt`, etc.)
+
+## Next Steps
+
+1. **Review**: Examine the staging area outputs to verify correctness
+2. **Move NEW and MOD folders**: Copy to `{archive_directory}/{params$current_period}/`
+3. **Move intermediate files**: Copy to RunLogs folder structure
+4. **Update archive directory**: Copy the directory CSV to the archive root
+
+---
+
+*End of Report*
