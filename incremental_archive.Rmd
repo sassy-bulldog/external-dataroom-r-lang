@@ -1,176 +1,443 @@
 ---
-title: "U/W Folder Data Room Archive"
-author: "Chris Laws"
+title: "Incremental Data Room Archive System"
+author: "Data Management Team"
+date: "`r Sys.Date()`"
 output: 
   html_document:
     toc: true
-    toc_depth: 2
+    toc_depth: 3
     toc_float: true
     number_sections: true
+    theme: flatly
+    code_folding: show
 params:
-  current_period: "2025Q2"
-  run_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/RunLogs/2025Q2/"
-  output_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/Content/2025Q2/"
-  source_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/TEMP_2025Q2/"
-  archive_directory: "Z:/Shared/Jaffa External/Huggins/Underwriting/Content/"
-  archive_staging_directory: "Z:/Shared/Jaffa Main/Insurance/Reserving and Valuations/20250630/Huggins Dataroom/Underwriting/Content/"
-  remove_working_files: TRUE
+  # Global Configuration
+  global_snapshot_id: "2025Q2"
+  staging_root: "Z:/staging/"
+  archive_root: "Z:/archive/"
+  
+  # Archive Configurations (can be overridden)
+  archive_configs: !r list(
+    underwriting = list(
+      archive_name = "underwriting",
+      source_path = "Z:/source/underwriting/2025Q2/",
+      classification_pattern = "^([^/]+)/([^/]+)/",
+      exclude_patterns = c("Working Files", "\\.tmp$", "~\\$", "\\.log$")
+    ),
+    claims = list(
+      archive_name = "claims", 
+      source_path = "Z:/source/claims/current/",
+      classification_pattern = "^([^/]+)/([^/]+)/([^/]+)/",
+      exclude_patterns = c("temp", "backup", "\\.bak$")
+    ),
+    financials = list(
+      archive_name = "financials",
+      source_path = "Z:/source/finance/monthly/",
+      classification_pattern = "^([^/]+)/([^/]+)/",
+      exclude_patterns = c("draft", "working", "\\.xlsx~$")
+    )
+  )
+  
+  # Processing Options
+  parallel_processing: true
+  create_visualizations: true
+  send_notifications: false
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-```
-
-# Overview
-
-## Purpose
-This script was created to incrementally archive U/W source files in the external data room.
-
-U/W source files generally do not change once they are finalized.
-And so the script builds a view of the the U/W source files by:
- 1. Referencing files already in the archive
- 2. Adding new files to the archive
- 3. Coping any modified files into the archive.
-The script looks to help focus the archive user toward new/modified files while providing easy access to previously existing files.
-
-## Approach
-The script compares the current set of U/W source files to those already in the archive.
-If the (relative) path, file name, last write time, and size already exist in the archive; the file is assumed unchanged.
-Otherwise, the file is assumed to be new/modified and archived file (and associated files) are considered invalid and the current files are added to the archive.
-
-In the event that the file may have existed before, the script tries to summarize what may have changed.
-* The script tries to identify files that have the same (relative) path and name, but may have been modified because the last write time and size have changed.
-* The script tries to identify files that may have been renamed by first comparing the (relative) path, last write time, and size.
-   - If these qualities match, a full file hash is pulled and compared to ensure the contents are consistent between the two files with different names.
-   
-## Helpful Conventions
-- The script associates each collection of files by "segment" and "deal".
-- The script assumes that files are stored in a hierarchical file path with a "./<segment>/<deal>/*" convention.
-- The script *does not* look for files that have been removed. For instance, is the archive has file XYZ.csv associated with Segment A Deal 1 and the current U/W sources files have removed XYZ.csv, file XYZ.csv will not be considered when comparing the current and archived versions of Segment A Deal 1.
-
-The archive structure should consist of:
-1. A Content folder that houses the archived U/W source files. 
-   - The Content folder consists of a series of sub-folders.
-   - Each sub-folder is typically named in a {YYYY}Q{Q} pattern (e.g., 2025Q2) that corresponds the period in which the files were added.
-   - The names *must* sort in R such that max{sub-folder-name} is the most recent.
-2. A RunLogs folder the houses the script, logs, intermediate files, etc. used.
-   - The Content folder consists of a series of sub-folders.
-   - Each sub-folder is typically named in a {YYYY}Q{Q} pattern that corresponds the period in which the files were added.
-3. A series of archive directory files.
-   - Each archive directory file is typically named in a {YYYY}Q{Q}_Directory.csv pattern that corresponds the period in which the files were added.
- 
-Note that we used powershell to get this info to avoid a max file path limitation of R packages.
-   
-## Output
-The script output is:
-1. A "NEW" folder that contains all "segment"x"deal"(s) that did not previously exist in the archive.
-2. A "MOD" folder that contains all "segment"x"deal"(s) that previously existed in the archive but now have files that did not match the archive.
-3. An archive directory that includes the full set of "segment"x"deal"s and helpful information such as where to locate the current archived copy and a summary of what may have changed for "segment"x"deal"s showing modified files.
-
-Note that two File Directories are created.
-One that references the path relative to the archive staging area; this directory is useful to inspect the output *before* the output is copied into the final archive area.
-The other that references the path relative to the final archive area; this directory is useful to navigate the final archive area.
-
-## Running the Script
-
-### Step 1
-Setup the new staging area/folder structure.
-This can be any new/unused folder. 
-Intermediate files, the script, and output will be initially populated into this staging area.
-The script should be copied into this new staging folder.
-
-### Step 2
-Adjust the values in the YAML parameters section at the top of this document, or pass them when rendering the document.
-
-### Step 3
-Compile a Report of the script.
-(Ctrl-Shift-K in R Studio or use `rmarkdown::render()`)
-The script will deposit the intermediate files, the script, and output into this staging area.
-
-### Step 4
-After the staging area has been manually reviewed, the contents can be manually moved into the archive.
-The NEW and MOD folders in the staging area should be copied into a newly created {YYYY}Q{Q} sub-folder of the Content folder.
-The other files should be copied into a newly created {YYYY}Q{Q} sub-folder of the RunLogs folder.
-The archive directory file should copied into the root of the archive (i.e., the same level as the Content and RunLogs folder).
-
-# Input Parameters
-
-The following parameters are configured for this run:
-
-```{r display-params}
-# Display current parameters
-cat("Current Period:", params$current_period, "\n")
-cat("Run Staging Directory:", params$run_staging_directory, "\n") 
-cat("Output Staging Directory:", params$output_staging_directory, "\n")
-cat("Source Directory:", params$source_directory, "\n")
-cat("Archive Directory:", params$archive_directory, "\n")
-cat("Archive Staging Directory:", params$archive_staging_directory, "\n")
-cat("Remove Working Files:", params$remove_working_files, "\n")
-```
-
-# Initialize R
-
-```{r initialize}
-R.version
-Sys.time()
-
-# Source the underwriting functions
-source("underwriting_functions.R")
-```
-
-# Execute Archive Process
-
-```{r execute-archive}
-# Execute the main archiving function with parameters
-result <- archive_underwriting_files(
-  current_period = params$current_period,
-  run_staging_directory = params$run_staging_directory,
-  output_staging_directory = params$output_staging_directory,
-  source_directory = params$source_directory,
-  archive_directory = params$archive_directory,
-  archive_staging_directory = params$archive_staging_directory,
-  remove_working_files = params$remove_working_files
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
 )
+
+# Load required libraries
+library(fs)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(jsonlite)
+library(DT)
+library(plotly)
+library(knitr)
+library(kableExtra)
+
+# Source the generalized functions
+source("dataroom_functions.R")
 ```
 
-# Summary Results
+# Executive Summary
 
-```{r summary}
-cat("Archive process completed successfully!\n")
-cat("Current Period:", result$current_period, "\n")
-cat("New Deals Found:", nrow(result$new_deals), "\n")
-cat("Modified Deals Found:", nrow(result$mod_deals), "\n")
-cat("Old Deals (Unchanged):", nrow(result$old_deals), "\n")
-cat("Total Files Copied:", result$files_copied, "\n")
+This report documents the incremental archive process for multiple data room sources as of **`r params$global_snapshot_id`**. The system compares current source files against previous snapshots, identifying new, modified, and unchanged files to create efficient incremental archives.
 
-if(nrow(result$new_deals) > 0) {
-  cat("\nNew Deals:\n")
-  print(result$new_deals)
-}
+## Key Features
 
-if(nrow(result$mod_deals) > 0) {
-  cat("\nModified Deals:\n")
-  print(result$mod_deals %>% select(segment, deal, n_mod_or_add_files))
-}
-```
-
-# File Operations Log
-
-The script has created the following outputs in the staging directory:
-
-- `{params$current_period}_Staging_Directory.csv`: Directory file for staging area navigation
-- `{params$current_period}_Directory.csv`: Directory file for final archive navigation  
-- `NEW/` folder: Contains newly archived segment/deal combinations
-- `MOD/` folder: Contains modified segment/deal combinations
-- Various intermediate files (`RAW_INFO_*.txt`, `hash.txt`, etc.)
-
-## Next Steps
-
-1. **Review**: Examine the staging area outputs to verify correctness
-2. **Move NEW and MOD folders**: Copy to `{archive_directory}/{params$current_period}/`
-3. **Move intermediate files**: Copy to RunLogs folder structure
-4. **Update archive directory**: Copy the directory CSV to the archive root
+- **Incremental Processing**: Only new and changed files are copied
+- **Metadata Caching**: JSON files store MD5 hashes for fast comparisons
+- **Multi-Source Support**: Process multiple archive types simultaneously  
+- **Change Tracking**: Detailed logging of what changed and why
+- **Reference System**: Unchanged files reference previous snapshots
 
 ---
 
-*End of Report*
+# Configuration
+
+## Global Settings
+
+```{r display-config}
+cat("Global Snapshot ID:", params$global_snapshot_id, "\n")
+cat("Staging Root:", params$staging_root, "\n")
+cat("Archive Root:", params$archive_root, "\n")
+cat("Parallel Processing:", params$parallel_processing, "\n")
+cat("Number of Archive Sources:", length(params$archive_configs), "\n")
+```
+
+## Archive Sources
+
+```{r display-sources}
+source_summary <- map_dfr(params$archive_configs, ~ {
+  tibble(
+    Archive_Name = .x$archive_name,
+    Source_Path = .x$source_path,
+    Classification_Pattern = .x$classification_pattern,
+    Exclusion_Count = length(.x$exclude_patterns)
+  )
+})
+
+kable(source_summary, caption = "Configured Archive Sources") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+---
+
+# Archive Processing
+
+## Prepare Configurations
+
+```{r prepare-configs}
+# Prepare full configurations by adding global settings
+full_configs <- map(params$archive_configs, ~ {
+  config <- .x
+  config$snapshot_id <- params$global_snapshot_id
+  config$staging_root <- params$staging_root
+  config$archive_root <- path(params$archive_root, config$archive_name)
+  config
+})
+
+# Display prepared configurations
+config_df <- map_dfr(full_configs, ~ {
+  tibble(
+    Archive = .x$archive_name,
+    Snapshot_ID = .x$snapshot_id,
+    Source = .x$source_path,
+    Archive_Root = .x$archive_root,
+    Staging_Root = .x$staging_root
+  )
+})
+
+kable(config_df, caption = "Full Archive Configurations") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%")
+```
+
+## Execute Archive Process
+
+```{r execute-archives}
+start_time <- Sys.time()
+
+# Execute the archive process
+if(params$parallel_processing && length(full_configs) > 1) {
+  message("Processing archives in parallel...")
+  # For now, process sequentially but could be enhanced with future/furrr
+  archive_results <- create_multiple_archives(full_configs, params$global_snapshot_id)
+} else {
+  message("Processing archives sequentially...")
+  archive_results <- create_multiple_archives(full_configs, params$global_snapshot_id)
+}
+
+end_time <- Sys.time()
+processing_time <- end_time - start_time
+
+message("Total processing time: ", round(processing_time, 2), " ", units(processing_time))
+```
+
+---
+
+# Results Summary
+
+## Overall Statistics
+
+```{r overall-stats}
+summary_stats <- archive_results$summary
+
+stats_df <- tibble(
+  Metric = c(
+    "Total Archives Processed",
+    "Total Files Processed", 
+    "Total Files Copied",
+    "Total New Files",
+    "Total Modified Files",
+    "Processing Time"
+  ),
+  Value = c(
+    archive_results$total_archives,
+    format(summary_stats$total_files_processed, big.mark = ","),
+    format(summary_stats$total_files_copied, big.mark = ","),
+    format(summary_stats$total_new_files, big.mark = ","),
+    format(summary_stats$total_modified_files, big.mark = ","),
+    paste(round(processing_time, 2), units(processing_time))
+  )
+)
+
+kable(stats_df, caption = "Overall Processing Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Individual Archive Results
+
+```{r individual-results}
+individual_stats <- map_dfr(archive_results$individual_results, ~ {
+  tibble(
+    Archive_Name = .x$archive_config$archive_name,
+    Files_New = .x$comparison_summary$new_count,
+    Files_Modified = .x$comparison_summary$modified_count,
+    Files_Unchanged = .x$comparison_summary$unchanged_count,
+    Files_Copied = .x$files_copied,
+    Files_Failed = .x$files_failed,
+    Status = ifelse(.x$files_failed > 0, "⚠️ With Warnings", "✅ Success")
+  )
+})
+
+datatable(
+  individual_stats,
+  caption = "Individual Archive Processing Results",
+  options = list(pageLength = 10, autoWidth = TRUE),
+  class = "display"
+) %>%
+  formatStyle(
+    "Status",
+    backgroundColor = styleEqual("✅ Success", "#d4edda")
+  )
+```
+
+```{r create-visualizations, eval=params$create_visualizations}
+## File Change Distribution
+
+change_data <- individual_stats %>%
+  select(Archive_Name, Files_New, Files_Modified, Files_Unchanged) %>%
+  pivot_longer(cols = starts_with("Files_"), names_to = "Change_Type", values_to = "Count") %>%
+  mutate(Change_Type = str_remove(Change_Type, "Files_"))
+
+# Create interactive bar chart
+p1 <- plot_ly(
+  change_data,
+  x = ~Archive_Name,
+  y = ~Count,
+  color = ~Change_Type,
+  type = "bar",
+  colors = c("New" = "#28a745", "Modified" = "#ffc107", "Unchanged" = "#6c757d")
+) %>%
+  layout(
+    title = "File Changes by Archive",
+    xaxis = list(title = "Archive"),
+    yaxis = list(title = "Number of Files"),
+    barmode = "stack"
+  )
+
+p1
+
+## Archive Size Distribution
+
+size_data <- map_dfr(archive_results$individual_results, ~ {
+  if(file_exists(.x$metadata_file)) {
+    metadata <- read_json(.x$metadata_file, simplifyVector = TRUE)
+    tibble(
+      Archive_Name = .x$archive_config$archive_name,
+      Total_Size_MB = round(metadata$summary$total_size / (1024^2), 2),
+      File_Count = metadata$summary$total_files
+    )
+  }
+})
+
+if(nrow(size_data) > 0) {
+  p2 <- plot_ly(
+    size_data,
+    x = ~Archive_Name,
+    y = ~Total_Size_MB,
+    type = "bar",
+    marker = list(color = "#007bff")
+  ) %>%
+    layout(
+      title = "Archive Size Distribution",
+      xaxis = list(title = "Archive"),
+      yaxis = list(title = "Size (MB)")
+    )
+  
+  p2
+}
+```
+
+---
+
+# Detailed Archive Information
+
+```{r detailed-info}
+for(archive_name in names(archive_results$individual_results)) {
+  result <- archive_results$individual_results[[archive_name]]
+  
+  cat("## ", str_to_title(archive_name), " Archive\n\n")
+  
+  cat("**Configuration:**\n")
+  cat("- Source Path:", result$archive_config$source_path, "\n")
+  cat("- Staging Path:", result$staging_path, "\n") 
+  cat("- Snapshot ID:", result$snapshot_id, "\n")
+  cat("- Created:", result$created_at, "\n\n")
+  
+  cat("**Processing Summary:**\n")
+  cat("- New Files:", result$comparison_summary$new_count, "\n")
+  cat("- Modified Files:", result$comparison_summary$modified_count, "\n")
+  cat("- Unchanged Files:", result$comparison_summary$unchanged_count, "\n")
+  cat("- Renamed Files:", result$comparison_summary$renamed_count %||% 0, "\n")
+  cat("- Files Copied:", result$files_copied, "\n")
+  cat("- Copy Failures:", result$files_failed, "\n\n")
+  
+  # Load and display file summary if available
+  summary_file <- path(result$staging_path, paste0(result$snapshot_id, "_file_summary.csv"))
+  if(file_exists(summary_file)) {
+    file_summary <- read_csv(summary_file, show_col_types = FALSE) %>%
+      head(100)  # Limit to first 100 rows for display
+    
+    if(nrow(file_summary) > 0) {
+      cat("**File Summary (First 100 files):**\n\n")
+      
+      # Create a nice table
+      summary_table <- file_summary %>%
+        mutate(
+          size_mb = round(size / (1024^2), 3),
+          modified_date = as.Date(ymd_hms(modified_time))
+        ) %>%
+        select(Status = status, Category1 = category_1, Category2 = category_2, 
+               File = file_name, `Size (MB)` = size_mb, Modified = modified_date) %>%
+        arrange(Status, Category1, Category2)
+      
+      print(kable(summary_table, caption = paste("File Summary for", str_to_title(archive_name))) %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 10) %>%
+        scroll_box(height = "400px"))
+    }
+  }
+  
+  cat("\n---\n\n")
+}
+```
+
+# File Locations and Next Steps
+
+## Staging Locations
+
+The following staging directories contain the processed files:
+
+```{r staging-locations}
+staging_info <- map_dfr(archive_results$individual_results, ~ {
+  tibble(
+    Archive = .x$archive_config$archive_name,
+    Staging_Path = .x$staging_path,
+    Metadata_File = .x$metadata_file,
+    Files_Ready = file_exists(.x$staging_path)
+  )
+})
+
+kable(staging_info, caption = "Staging Directory Locations") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%")
+```
+
+## Manual Steps Required
+
+After reviewing the results above:
+
+1. **Review Staging Areas**: Examine the staging directories to verify the files were processed correctly
+2. **Handle Failed Copies**: Check any failed copy logs and resolve issues
+3. **Move to Archive**: Copy the staging contents to the final archive locations
+4. **Update References**: Update any external systems that reference the archive locations
+5. **Cleanup**: Remove staging files after successful archive deployment
+
+## Archive Structure
+
+Each archive follows this structure:
+```
+{archive_root}/{archive_name}/{snapshot_id}/
+├── NEW/                    # New files organized by categories
+├── MODIFIED/               # Modified files organized by categories  
+├── UNCHANGED/              # Reference information for unchanged files
+├── {snapshot_id}_metadata.json          # Complete file metadata
+├── {snapshot_id}_archive_report.json    # Processing results
+├── {snapshot_id}_file_summary.csv       # Human-readable summary
+└── unchanged_file_references.csv        # References to previous snapshots
+```
+
+---
+
+# System Health and Recommendations
+
+```{r health-check}
+# Check for any issues
+issues <- list()
+
+# Check for failed copies
+total_failures <- sum(map_dbl(archive_results$individual_results, ~ .x$files_failed))
+if(total_failures > 0) {
+  issues <- append(issues, paste("⚠️", total_failures, "files failed to copy"))
+}
+
+# Check for missing source directories
+missing_sources <- map_lgl(full_configs, ~ !dir_exists(.x$source_path))
+if(any(missing_sources)) {
+  missing_names <- map_chr(full_configs[missing_sources], ~ .x$archive_name)
+  issues <- append(issues, paste("⚠️ Missing source directories:", paste(missing_names, collapse = ", ")))
+}
+
+# Check staging space
+staging_sizes <- map_dbl(archive_results$individual_results, ~ {
+  if(dir_exists(.x$staging_path)) {
+    sum(file_size(dir_ls(.x$staging_path, recurse = TRUE, type = "file")), na.rm = TRUE)
+  } else {
+    0
+  }
+})
+total_staging_gb <- sum(staging_sizes) / (1024^3)
+
+if(length(issues) == 0) {
+  cat("✅ **System Health: Good**\n\n")
+  cat("No critical issues detected.\n\n")
+} else {
+  cat("⚠️ **System Health: Issues Detected**\n\n")
+  for(issue in issues) {
+    cat(issue, "\n")
+  }
+  cat("\n")
+}
+
+cat("**Resource Usage:**\n")
+cat("- Total staging space used:", round(total_staging_gb, 2), "GB\n")
+cat("- Processing time:", round(processing_time, 2), units(processing_time), "\n")
+cat("- Memory usage: Check system resources if processing was slow\n\n")
+
+cat("**Recommendations:**\n")
+if(total_staging_gb > 10) {
+  cat("- Consider cleanup of staging areas after archiving\n")
+}
+if(as.numeric(processing_time, units = "mins") > 30) {
+  cat("- Consider enabling parallel processing for faster execution\n")
+}
+if(total_failures > 0) {
+  cat("- Review failed copy logs and retry failed operations\n")
+}
+cat("- Schedule regular cleanup of old snapshot metadata files\n")
+cat("- Monitor archive storage capacity\n")
+```
+
+---
+
+*Report generated on `r Sys.time()` by the Incremental Data Room Archive System*

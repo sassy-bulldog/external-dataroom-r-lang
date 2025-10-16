@@ -1,518 +1,480 @@
-#' Underwriting Data Room Archive Functions
+#' Incremental Data Room Archive Functions
 #' 
-#' This file contains the core functionality for archiving U/W source files
-#' in the external data room, extracted from the original script to allow
-#' for parameterized execution.
+#' This file contains generalized functionality for creating incremental archives
+#' of any source folder structure, comparing against previous snapshots, and
+#' maintaining efficient metadata for fast comparisons.
 
-#' Archive Underwriting Files
+library(fs)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(jsonlite)
+library(digest)
+
+#' Create or Update Snapshot Metadata
 #'
-#' This function archives underwriting source files by comparing current files
-#' with those already in the archive, identifying new and modified files,
-#' and copying them to appropriate staging directories.
+#' Creates a JSON metadata file containing file hashes, timestamps, and structure
+#' information for quick comparison without full filesystem scans.
 #'
-#' @param current_period Character string for the current period (e.g., "2025Q2")
-#' @param run_staging_directory Path to deposit intermediate files
-#' @param output_staging_directory Path to deposit output archive files  
-#' @param source_directory Path to current u/w source files to be archived
-#' @param archive_directory Final archive directory path
-#' @param archive_staging_directory Path to read current archive files from
-#' @param remove_working_files Logical, whether to exclude "Working Files" directories
-#' @return List containing summary information about the archiving process
+#' @param source_path Path to scan for files
+#' @param snapshot_id Unique identifier for this snapshot (e.g., "2025Q2", "monthly_2025_10")
+#' @param metadata_file Path where JSON metadata should be saved
+#' @param classification_pattern Regex pattern to extract classification info from paths
+#' @param exclude_patterns Vector of regex patterns for paths to exclude
+#' @return List containing metadata information
 #' @export
-archive_underwriting_files <- function(
-  current_period,
-  run_staging_directory,
-  output_staging_directory,
-  source_directory,
-  archive_directory,
-  archive_staging_directory,
-  remove_working_files = TRUE
+create_snapshot_metadata <- function(
+  source_path,
+  snapshot_id,
+  metadata_file,
+  classification_pattern = "^([^/]+)/([^/]+)/",
+  exclude_patterns = c("Working Files", "\\.tmp$", "~\\$")
 ) {
   
-  # Load required libraries
-  library(fs) 
-  library(tidyverse)
-  library(stringr)
-  library(lubridate)
+  message("Creating snapshot metadata for: ", source_path)
   
-  # Set working directory
-  original_wd <- getwd()
-  on.exit(setwd(original_wd))
-  setwd(run_staging_directory)
+  # Get all files recursively
+  all_files <- dir_ls(source_path, recurse = TRUE, type = "file")
   
-  # Helper function to get file info using PowerShell
-  get_file_info_ps <- function(inspect_dir, out_file_name, path = getwd()) {
-    cmd <- str_glue( 
-      "pwsh -Command \"$ans=Get-ChildItem -LiteralPath '\\\\?\\{{inspect_dir}}' -Directory | ForEach-Object  {{ ; ",
-      "$inner_dir=Convert-Path -LiteralPath $_.FullName;", 
-      "Get-ChildItem -LiteralPath $inner_dir -R -File | ForEach-Object -ThrottleLimit 5 -Parallel {{",
-      "$x=Convert-Path -LiteralPath $_.FullName;", 
-      "[PSCustomObject]@{{Length=$_.Length ; ",
-      "FullName=$_.FullName ; ",
-      "LastWriteTime = $_.LastWriteTime",
-      "}} }} }}; Start-Sleep -Milliseconds 100; $ans | Export-Csv '{{getwd()}}/{{out_file_name}}.txt' -Encoding ASCII\"", 
-      .open = '{{', .close = '}}'
-    )
-    
-    message(str_glue("Inspecting: {inspect_dir}; Output to: {out_file_name}"))
-    shell(cmd, mustWork = TRUE, intern = TRUE)
+  # Apply exclusion patterns
+  for(pattern in exclude_patterns) {
+    all_files <- all_files[!grepl(pattern, all_files, ignore.case = TRUE)]
   }
   
-  # Helper function to get directory info using PowerShell
-  dir_info_ps <- function(path) {
-    path <- normalizePath(path, mustWork = TRUE)
-    tf_dir_info <- tempfile(fileext = 'txt')
-    on.exit(unlink(tf_dir_info))
-    
-    shell(str_glue('pwsh -Command "Get-ChildItem -LiteralPath \'{path}\' | Select Attributes, FullName| Export-Csv {tf_dir_info}" '))
-    read_csv(tf_dir_info, show_col_types = FALSE)
+  if(length(all_files) == 0) {
+    warning("No files found in source path after applying exclusions")
+    return(list(files = list(), summary = list()))
   }
   
-  # Collect info on archive files
-  message("Collecting archive file information...")
-  jj <- 0
-  for(i in dir_ls(archive_staging_directory, type = 'directory')) {
-    for(j in dir_ls(i, type = 'directory')) {
-      jj <- jj + 1
-      get_file_info_ps(
-        inspect_dir = normalizePath(j, mustWork = TRUE), 
-        out_file_name = str_glue('RAW_INFO_current_archive_{jj}')
-      )
-    }
-    Sys.sleep(5)
-  }
-  Sys.sleep(15)
+  message("Processing ", length(all_files), " files...")
   
-  # Combine archive file information
-  arch_files <- dir_ls(glob = 'RAW_INFO_current_archive_*', type = 'file')
-  current_archive_data_00 <- read_csv(arch_files[1])
-  if(length(arch_files) > 1) {
-    for(jj in arch_files[-1]) {
-      current_archive_data_00 <- bind_rows(current_archive_data_00, read_csv(jj))
-    }
+  # Create file metadata in parallel chunks
+  process_chunk <- function(file_chunk) {
+    map_dfr(file_chunk, function(file_path) {
+      tryCatch({
+        file_info <- file_info(file_path)
+        rel_path <- path_rel(file_path, source_path)
+        
+        # Extract classification info using regex
+        classification <- str_match(rel_path, classification_pattern)
+        
+        tibble(
+          full_path = as.character(file_path),
+          relative_path = as.character(rel_path),
+          file_name = path_file(file_path),
+          size = file_info$size,
+          modified_time = as.character(file_info$modification_time),
+          md5_hash = digest(file = file_path, algo = "md5"),
+          category_1 = if(!is.na(classification[2])) classification[2] else "uncategorized",
+          category_2 = if(!is.na(classification[3])) classification[3] else "uncategorized",
+          directory = path_dir(rel_path)
+        )
+      }, error = function(e) {
+        warning("Error processing file: ", file_path, " - ", e$message)
+        NULL
+      })
+    })
   }
-  write_csv(current_archive_data_00, 'RAW_INFO_current_archive.txt')
   
-  # Collect info on current files
-  message("Collecting source file information...")
-  Sys.sleep(30)
-  get_file_info_ps(
-    inspect_dir = normalizePath(source_directory, mustWork = TRUE), 
-    out_file_name = 'RAW_INFO_source_directory'
+  # Process in chunks for better memory management
+  chunk_size <- min(100, length(all_files))
+  file_chunks <- split(all_files, ceiling(seq_along(all_files) / chunk_size))
+  
+  file_metadata <- map_dfr(file_chunks, process_chunk)
+  
+  # Create summary statistics
+  summary_stats <- list(
+    snapshot_id = snapshot_id,
+    created_at = as.character(Sys.time()),
+    source_path = source_path,
+    total_files = nrow(file_metadata),
+    total_size = sum(file_metadata$size, na.rm = TRUE),
+    categories = file_metadata %>% 
+      count(category_1, category_2, name = "file_count") %>%
+      arrange(category_1, category_2),
+    file_types = file_metadata %>%
+      mutate(extension = path_ext(file_name)) %>%
+      count(extension, name = "count") %>%
+      arrange(desc(count))
   )
-  Sys.sleep(30)
   
-  # Process archive data
-  message("Processing file information...")
-  current_archive_data <- read_csv('RAW_INFO_current_archive.txt') %>%
-    mutate(file_id = paste0('arch_', 1:n())) %>%
-    mutate(
-      FullName = gsub(paste0('^', str_escape('\\\\?\\')), '', FullName),
-      FullName = gsub('\\', '/', FullName, fixed = TRUE),
-      period = gsub(paste0('(', archive_staging_directory, ')', '([^/]*)(/)(.*)'), '\\2', FullName),
-      rel_path = gsub(paste0('(', archive_staging_directory, ')', '([^/]*)(/)'), '<root>/', FullName),
-      rel_path_star = gsub('(<root>)(/)([^/]*)(.*)', '\\1\\2*\\4', rel_path),
-      rel_path_wo_file = gsub('([^/]*)$', '<file>', rel_path),
-      rel_path_star_wo_file = gsub('([^/]*)$', '<file>', rel_path_star),
-      file_name = gsub('([^/]+[/])*([^/]*)($)', '\\2', rel_path),
-      class_segment_deal = gsub("(<root>)(/)([^/]*)(/)([^/]*)(/)([^/]*)(.*)", "\\3/\\5/\\7", rel_path),
-      age = 'ARCHIVE'
-    ) %>%
-    separate(class_segment_deal, c('class', 'segment', 'deal'), '/')
+  # Create complete metadata object
+  metadata <- list(
+    summary = summary_stats,
+    files = file_metadata
+  )
   
-  # Process source data
-  source_data <- read_csv('RAW_INFO_source_directory.txt') %>%
-    mutate(file_id = paste0('source_', 1:n())) %>%
-    mutate(
-      FullName = gsub(paste0('^', str_escape('\\\\?\\')), '', FullName),
-      FullName = gsub('\\', '/', FullName, fixed = TRUE),
-      rel_path = gsub(source_directory, '<root>/', FullName, fixed = TRUE),
-      rel_path_star = gsub(source_directory, '<root>/*/', FullName, fixed = TRUE),
-      rel_path_wo_file = gsub('([^/]*)$', '<file>', rel_path),
-      rel_path_star_wo_file = gsub('([^/]*)$', '<file>', rel_path_star),
-      file_name = gsub('([^/]+[/])*([^/]*)($)', '\\2', rel_path),
-      segment_deal = gsub("(<root>)(/)([^/]*)(/)([^/]*)(.*)", "\\3/\\5", rel_path),
-      period = current_period,
-      age = 'SOURCE'
-    ) %>%
-    separate(segment_deal, c('segment', 'deal'), '/')
+  # Save to JSON file
+  dir_create(path_dir(metadata_file))
+  write_json(metadata, metadata_file, pretty = TRUE, auto_unbox = TRUE)
   
-  # Filter working files if requested
-  if(remove_working_files) {
-    source_data2 <- source_data %>%
-      mutate(x = gsub('(<root>/\\*/)([^/]*)(/)([^/]*)(/)(.*)', '\\6', rel_path_star)) %>% 
-      filter(!grepl("^Working Files/", x, ignore.case = TRUE)) %>%
-      select(-x)
-  } else {
-    source_data2 <- source_data
+  message("Metadata saved to: ", metadata_file)
+  return(metadata)
+}
+
+#' Load Snapshot Metadata
+#'
+#' Loads previously saved snapshot metadata from JSON file
+#'
+#' @param metadata_file Path to JSON metadata file
+#' @return List containing metadata information or NULL if file doesn't exist
+#' @export
+load_snapshot_metadata <- function(metadata_file) {
+  if(!file_exists(metadata_file)) {
+    return(NULL)
   }
   
-  # Process archive data to get latest versions
-  current_archive_data2 <- current_archive_data %>%
-    group_by(segment, deal) %>%
-    mutate(original_segment_deal_period = min(period)) %>%
-    filter(period == max(period)) %>%
-    ungroup()
+  tryCatch({
+    metadata <- read_json(metadata_file, simplifyVector = TRUE)
+    # Convert files back to tibble if it exists
+    if(!is.null(metadata$files) && length(metadata$files) > 0) {
+      metadata$files <- as_tibble(metadata$files)
+    }
+    return(metadata)
+  }, error = function(e) {
+    warning("Error loading metadata file: ", metadata_file, " - ", e$message)
+    return(NULL)
+  })
+}
+
+#' Compare Snapshots and Identify Changes
+#'
+#' Compares current source against previous snapshot metadata to identify
+#' new, modified, and unchanged files
+#'
+#' @param current_metadata Current snapshot metadata
+#' @param previous_metadata Previous snapshot metadata (can be NULL)
+#' @return List containing categorized file information
+#' @export
+compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
   
-  # Combine data
-  data <- bind_rows(source_data2, current_archive_data2)
-  
-  data2 <- data %>%
-    group_by(segment, deal) %>%
-    mutate(
-      min_segment_deal_period = min(period), 
-      original_segment_deal_period = min(coalesce(original_segment_deal_period, current_period))
-    ) %>%
-    group_by(rel_path_star, LastWriteTime, Length) %>%
-    mutate(min_file_period = min(period))
-  
-  # Identify modified files
-  message("Identifying modified files...")
-  mod_files <- data2 %>%
-    filter(
-      age == 'SOURCE', 
-      min_file_period == period, 
-      period != min_segment_deal_period
-    )
-  
-  # Search for what changed - name matches
-  name_match <- mod_files %>%
-    inner_join(
-      data2 %>% filter(age != 'SOURCE'),
-      by = c('segment', 'deal', 'rel_path_star'),
-      relationship = 'one-to-one',
-      suffix = c('', '__prior_name')
-    ) %>%
-    select(names(mod_files), 'LastWriteTime__prior_name', 'Length__prior_name', 'file_id__prior_name')
-  
-  # Search for renamed files
-  possible_info_match <- mod_files %>%
-    inner_join(
-      data2 %>% filter(age != 'SOURCE'),
-      by = c('segment', 'deal', 'rel_path_star_wo_file', 'Length', 'LastWriteTime'),
-      relationship = 'one-to-one', 
-      suffix = c('', '__prior_info')
-    ) %>%
-    select(names(mod_files), 'FullName__prior_info', 'rel_path__prior_info', 'rel_path_star__prior_info', 'file_id__prior_info')
-  
-  # Hash comparison for renamed files
-  if(nrow(possible_info_match) > 0) {
-    cmd0 <- possible_info_match %>%
-      str_glue_data("@{{ FullName='{FullName}'; FullName__prior_info='{FullName__prior_info}' }}") %>%
-      paste0(collapse = ', ')
-    
-    cmd1 <- str_glue('@({cmd0})')
-    
-    cmd <- str_glue( 
-      "{{cmd1}} | ForEach-Object {{ ; ",
-      "$x=Convert-Path -LiteralPath $_['FullName'];", 
-      "$y=Convert-Path -LiteralPath $_['FullName__prior_info'];", 
-      "$currenthash = Get-FileHash -Algorithm MD5 -LiteralPath $x  | Select-Object -ExpandProperty Hash ;",
-      "$priorhash = Get-FileHash -Algorithm MD5 -LiteralPath $y  | Select-Object -ExpandProperty Hash ;",
-      "[PSCustomObject]@{{",
-      "FullName=$_['FullName'] ; ",
-      "FullName__prior_info=$_['FullName__prior_info'] ; ",
-      "Hash = $currenthash;",
-      "FullName__prior_info_Hash = $priorhash;}} }} ",
-      "| Export-Csv '{{getwd()}}/hash.txt' -Encoding ASCII",
-      .open = '{{', .close = '}}'
-    )
-    
-    tf <- tempfile(pattern = 'script', fileext = '.ps1')
-    cat(cmd, file = tf)
-    shell(str_glue('pwsh {tf} '), mustWork = TRUE, intern = TRUE)
-    
-    hash_info <- read_csv(file.path(getwd(), 'hash.txt'))
-    
-    info_match <- possible_info_match %>%
-      inner_join(hash_info, by = c('FullName', 'FullName__prior_info'), relationship = 'one-to-one') %>%
-      filter(Hash == FullName__prior_info_Hash)
-  } else {
-    info_match <- possible_info_match[0, ]
-  }
-  
-  # Summarize changes
-  name_match2 <- if(nrow(name_match) > 0) {
-    name_match %>%
-      mutate(mod_info_summary = str_glue('\t-) "{rel_path}" changed Size and LastWriteTime {Length__prior_name}=>{Length} and {LastWriteTime__prior_name}=>{LastWriteTime}')) %>%
-      group_by(segment, deal) %>%
-      summarise(
-        n_mod_info = n(),
-        mod_info_summary = paste0(mod_info_summary, collapse = '\n'),
-        .groups = 'drop'
+  if(is.null(previous_metadata) || is.null(previous_metadata$files) || nrow(previous_metadata$files) == 0) {
+    message("No previous snapshot found - all files will be treated as new")
+    return(list(
+      new_files = current_metadata$files,
+      modified_files = tibble(),
+      unchanged_files = tibble(),
+      removed_files = tibble(),
+      summary = list(
+        new_count = nrow(current_metadata$files),
+        modified_count = 0,
+        unchanged_count = 0,
+        removed_count = 0
       )
-  } else {
-    tibble(segment = character(), deal = character(), n_mod_info = integer(), mod_info_summary = character())
+    ))
   }
   
-  info_match2 <- if(nrow(info_match) > 0) {
-    info_match %>%
-      mutate(mod_name_summary = str_glue('\t-) "{rel_path__prior_info}" is likely now named \n\t  "{rel_path}" as the Size ({Length}), LastWriteTime ({LastWriteTime}), and Hash match.')) %>% 
-      group_by(segment, deal) %>%
-      summarise(
-        n_mod_name = n(),
-        mod_name_summary = paste0(mod_name_summary, collapse = '\n'),
-        .groups = 'drop'
-      )
-  } else {
-    tibble(segment = character(), deal = character(), n_mod_name = integer(), mod_name_summary = character())
-  }
+  current_files <- current_metadata$files
+  previous_files <- previous_metadata$files
   
-  # Unmatched files
-  unmatched <- mod_files %>%
-    ungroup() %>%
-    anti_join(name_match, by = c('segment', 'deal', 'rel_path_star')) %>%
-    anti_join(info_match, by = c('segment', 'deal', 'rel_path_star'))
+  # Create comparison keys
+  current_files <- current_files %>%
+    mutate(comparison_key = paste(relative_path, size, modified_time, sep = "|"))
   
-  unmatched2 <- if(nrow(unmatched) > 0) {
-    unmatched %>%
-      group_by(segment, deal) %>%
-      summarise(
-        n_mod_unknown = n(),
-        mod_summary = paste0(rel_path, collapse = '\n'),
-        .groups = 'drop'
-      )
-  } else {
-    tibble(segment = character(), deal = character(), n_mod_unknown = integer(), mod_summary = character())
-  }
+  previous_files <- previous_files %>%
+    mutate(comparison_key = paste(relative_path, size, modified_time, sep = "|"))
   
-  # Classify deals
-  message("Classifying deals...")
-  new_deals <- data2 %>%
-    filter(
-      age == 'SOURCE',
-      min_file_period == period,
-      period == min_segment_deal_period
-    ) %>%
-    ungroup() %>%
-    select(period, original_segment_deal_period, segment, deal) %>%
-    distinct()
+  # Identify file categories
+  unchanged_files <- current_files %>%
+    inner_join(previous_files, by = "comparison_key", suffix = c("", "_prev")) %>%
+    select(all_of(names(current_files)[names(current_files) != "comparison_key"]))
   
-  mod_deals <- if(nrow(mod_files) > 0) {
-    mod_files %>%
-      ungroup() %>%
-      group_by(period, original_segment_deal_period, segment, deal) %>%
-      summarise(n_mod_or_add_files = n(), .groups = 'drop') %>%
-      ungroup()
-  } else {
-    tibble(period = character(), original_segment_deal_period = character(), 
-           segment = character(), deal = character(), n_mod_or_add_files = integer())
-  }
+  # Files that exist in current but not in previous (by path)
+  potential_new <- current_files %>%
+    anti_join(previous_files, by = "relative_path")
   
-  old_deals <- data2 %>%
-    filter(age != 'SOURCE') %>%
-    anti_join(mod_deals, by = c('segment', 'deal')) %>%
-    anti_join(new_deals, by = c('segment', 'deal')) %>%
-    ungroup() %>%
-    select(period, original_segment_deal_period, segment, deal, class) %>%
-    distinct()
+  # Files that exist in both locations but with different content
+  potential_modified <- current_files %>%
+    inner_join(previous_files, by = "relative_path", suffix = c("", "_prev")) %>%
+    filter(comparison_key != comparison_key_prev) %>%
+    select(all_of(names(current_files)[names(current_files) != "comparison_key"]))
   
-  # Detailed mod deals summary
-  mod_deals2 <- if(nrow(mod_deals) > 0) {
-    mod_deals %>%
-      left_join(name_match2, by = c('segment', 'deal')) %>%
-      left_join(info_match2, by = c('segment', 'deal')) %>%
-      left_join(unmatched2, by = c('segment', 'deal')) %>%
+  # Check for renamed files (same content, different path)
+  renamed_files <- tibble()
+  if(nrow(potential_new) > 0 && nrow(previous_files) > 0) {
+    # Match by md5_hash and size to find potential renames
+    potential_renames <- potential_new %>%
+      inner_join(
+        previous_files %>% 
+          anti_join(current_files, by = "relative_path"),
+        by = c("md5_hash", "size"),
+        suffix = c("", "_prev")
+      ) %>%
       mutate(
-        n_unexplained = n_mod_unknown,
-        mod_summary = str_glue(
-          'In total {n_mod_or_add_files} files appear to differ from the prior period.
-{coalesce(n_mod_name,0)} files were likely renamed and {coalesce(n_mod_info,0)} files were likely altered.
-The remaining {coalesce(n_unexplained,0)} files could be new additions or map to older files in more complex ways.
-
-Likely renamed files: 
-{coalesce(mod_name_summary, "")}.
-
-Likely altered files: 
-{coalesce(mod_info_summary, "")}.
-
-Unexplained files: 
-{coalesce(mod_summary, "")}.'))
-      %>%
-      select(period, original_segment_deal_period, segment, deal, n_mod_or_add_files, n_mod_name, n_mod_info, n_unexplained, mod_summary)
-  } else {
-    tibble(period = character(), original_segment_deal_period = character(), 
-           segment = character(), deal = character(), n_mod_or_add_files = integer(),
-           n_mod_name = integer(), n_mod_info = integer(), n_unexplained = integer(), mod_summary = character())
-  }
-  
-  # Populate staging area
-  message("Populating staging area...")
-  copy_info <- tribble(~segment, ~from, ~to)
-  
-  Sys.sleep(5)
-  dir_create(file.path(output_staging_directory, 'NEW'))
-  Sys.sleep(5)
-  
-  # Copy new files
-  if(nrow(new_deals) > 0) {
-    for(row_i in 1:nrow(new_deals)) {
-      segment_i <- new_deals$segment[row_i]
-      deal_i <- new_deals$deal[row_i]
-      
-      deal_files_folders_i <- dir_info_ps(normalizePath(file.path(source_directory, segment_i, deal_i)))
-      
-      for(jj in 1:nrow(deal_files_folders_i)) {
-        type_i <- deal_files_folders_i[jj, 'Attributes']
-        name_i <- tail(path_split(deal_files_folders_i[jj, 'FullName'])[[1]], 1)
-        
-        if(type_i != 'Directory') {
-          copy_info <- copy_info %>%
-            bind_rows(tribble(
-              ~segment, ~from, ~to,
-              segment_i,
-              normalizePath(file.path(source_directory, segment_i, deal_i, name_i), mustWork = FALSE),
-              normalizePath(file.path(output_staging_directory, 'NEW', segment_i, deal_i), mustWork = FALSE)
-            ))
-        } else if(remove_working_files && type_i == 'Directory' && grepl('Working Files', name_i, ignore.case = TRUE)) {
-          next
-        } else {
-          copy_info <- copy_info %>%
-            bind_rows(tribble(
-              ~segment, ~from, ~to,
-              segment_i,
-              normalizePath(file.path(source_directory, segment_i, deal_i, name_i), mustWork = FALSE),
-              normalizePath(file.path(output_staging_directory, 'NEW', segment_i, deal_i, name_i), mustWork = FALSE)
-            ))
-        }
-      }
-    }
-  }
-  
-  # Create MOD directory and copy modified files
-  dir_create(file.path(output_staging_directory, 'MOD'))
-  Sys.sleep(5)
-  
-  if(nrow(mod_deals2) > 0) {
-    for(row_i in 1:nrow(mod_deals2)) {
-      segment_i <- mod_deals2$segment[row_i]
-      deal_i <- mod_deals2$deal[row_i]
-      
-      deal_files_folders_i <- dir_info_ps(normalizePath(file.path(source_directory, segment_i, deal_i)))
-      
-      for(jj in 1:nrow(deal_files_folders_i)) {
-        type_i <- deal_files_folders_i[jj, 'Attributes']
-        name_i <- tail(path_split(deal_files_folders_i[jj, 'FullName'])[[1]], 1)
-        
-        if(type_i != 'Directory') {
-          copy_info <- copy_info %>%
-            bind_rows(tribble(
-              ~segment, ~from, ~to,
-              segment_i,
-              normalizePath(file.path(source_directory, segment_i, deal_i, name_i), mustWork = FALSE),
-              normalizePath(file.path(output_staging_directory, 'MOD', segment_i, deal_i), mustWork = FALSE)
-            ))
-        } else if(remove_working_files && type_i == 'Directory' && grepl('Working Files', name_i, ignore.case = TRUE)) {
-          next
-        } else {
-          copy_info <- copy_info %>%
-            bind_rows(tribble(
-              ~segment, ~from, ~to,
-              segment_i,
-              normalizePath(file.path(source_directory, segment_i, deal_i, name_i), mustWork = FALSE),
-              normalizePath(file.path(output_staging_directory, 'MOD', segment_i, deal_i, name_i), mustWork = FALSE)
-            ))
-        }
-      }
-    }
-  }
-  
-  # Execute file copying
-  message("Copying files...")
-  if(nrow(copy_info) > 0) {
-    Sys.sleep(5)
-    
-    cmd0 <- copy_info %>%
-      mutate(pws_dict = str_glue("@{{from = '\\\\?\\{from}';to = '\\\\?\\{to}' }}")) %>% 
-      group_by(segment) %>%
-      summarise(x = paste0(pws_dict, collapse = ','), .groups = 'drop') %>%
-      mutate(x = str_glue("@({x})")) %>%
-      summarise(x = paste0(x, collapse = ','), .groups = 'drop') %>%
-      pull(x)
-    
-    cmd1 <- str_glue('@( {cmd0} )')
-    cmdx <- paste0(
-      "if (-not (Test-Path -LiteralPath \"$dst\")) { New-Item -ItemType Directory -Path \"$dst\" | Out-Null }; ",
-      "if (Test-Path -LiteralPath \"$src\" -PathType Leaf) {",
-      "$tgt = Join-Path $dst (Split-Path $src -Leaf);",
-      "Copy-Item -LiteralPath $src -Destination $tgt -Force;",
-      "}else{",
-      "Get-ChildItem -LiteralPath \"$src\" -Recurse -File | ForEach-Object {;",
-      "$rel=$_.FullName.Substring(($src).Length); $tgt=($dst)+''+$rel; ",
-      "$dir=Split-Path $tgt; if (-not (Test-Path -LiteralPath $dir)) { ",
-      "New-Item -ItemType Directory -Path $dir -Force | Out-Null }; ",
-      "$x=Convert-Path -LiteralPath $_.FullName;",
-      "Copy-Item -LiteralPath $x -Destination $tgt -Force};}"
-    )
-    
-    cmd2 <- str_glue('$z = {cmd1}; $z | ForEach-Object -ThrottleLimit 2 -Parallel {{Write-Host "On New Item:"; $y=$_; $y | ForEach-Object  {{$src=$_[\'from\'];$dst=$_[\'to\']; Write-Host "Copying: $src To: $dst"; {cmdx}; Start-Sleep -Milliseconds 500 }} }} ')
-    
-    tf <- tempfile(pattern = "script", fileext = '.ps1')
-    cat(cmd2, file = tf)
-    shell(str_glue('pwsh "{tf}"'), mustWork = TRUE, intern = TRUE)
-  }
-  
-  # Write file directories
-  message("Writing file directories...")
-  bind_rows(
-    new_deals %>% mutate(class = "NEW"), 
-    mod_deals2 %>% mutate(class = "MOD", period = current_period), 
-    old_deals
-  ) %>%
-    rowwise() %>%
-    mutate(
-      rel_path = if_else(
-        period == current_period, 
-        file.path('<out_root>', class, segment, deal),
-        file.path('<archive_root>', period, class, segment, deal)
-      ),
-      link = paste0(
-        '=HYPERLINK("',
-        'https://jaffacorp.egnyte.com/', 
-        'navigate/path/', 
-        gsub(
-          '^<(out|archive)_root>/',
-          gsub('^Z:/', '', if_else(
-            period == current_period, 
-            output_staging_directory, 
-            archive_staging_directory
-          )), 
-          rel_path
-        ), 
-        '")'
+        change_type = "renamed",
+        previous_path = relative_path_prev
       )
-    ) %>% 
-    write_csv(str_glue('{current_period}_Staging_Directory.csv'))
+    
+    renamed_files <- potential_renames
+    
+    # Remove renamed files from potential_new
+    potential_new <- potential_new %>%
+      anti_join(potential_renames, by = c("relative_path", "md5_hash", "size"))
+  }
   
-  bind_rows(
-    new_deals %>% mutate(class = "NEW"), 
-    mod_deals2 %>% mutate(class = "MOD", period = current_period), 
-    old_deals
-  ) %>%
-    mutate(
-      rel_path = file.path('<root>', period, class, segment, deal),
-      link = paste0(
-        '=HYPERLINK("',
-        'https://jaffacorp.egnyte.com/', 
-        'navigate/path/', 
-        gsub(
-          '^<root>/',
-          gsub('^Z:/', '', archive_directory), 
-          rel_path
-        ), 
-        '")'
-      )
-    ) %>% 
-    write_csv(str_glue('{current_period}_Directory.csv'))
+  # Files that existed previously but not in current
+  removed_files <- previous_files %>%
+    anti_join(current_files, by = "relative_path") %>%
+    anti_join(renamed_files, by = c("relative_path" = "previous_path"))
   
-  message("Archive process completed successfully!")
-  
-  # Return summary information
-  list(
-    new_deals = new_deals,
-    mod_deals = mod_deals2,
-    old_deals = old_deals,
-    files_copied = nrow(copy_info),
-    current_period = current_period
+  summary_info <- list(
+    new_count = nrow(potential_new),
+    modified_count = nrow(potential_modified),
+    renamed_count = nrow(renamed_files),
+    unchanged_count = nrow(unchanged_files),
+    removed_count = nrow(removed_files)
   )
+  
+  message("Comparison complete:")
+  message("  New files: ", summary_info$new_count)
+  message("  Modified files: ", summary_info$modified_count)
+  message("  Renamed files: ", summary_info$renamed_count)
+  message("  Unchanged files: ", summary_info$unchanged_count)
+  message("  Removed files: ", summary_info$removed_count)
+  
+  return(list(
+    new_files = potential_new,
+    modified_files = potential_modified,
+    renamed_files = renamed_files,
+    unchanged_files = unchanged_files,
+    removed_files = removed_files,
+    summary = summary_info
+  ))
+}
+
+#' Create Incremental Archive
+#'
+#' Main function to create an incremental archive by comparing current source
+#' against previous snapshots and copying only new/changed files
+#'
+#' @param archive_config List containing archive configuration
+#' @return List containing archive results and metadata
+#' @export
+create_incremental_archive <- function(archive_config) {
+  
+  # Validate required config parameters
+  required_params <- c("snapshot_id", "source_path", "archive_root", "staging_root")
+  missing_params <- setdiff(required_params, names(archive_config))
+  if(length(missing_params) > 0) {
+    stop("Missing required parameters: ", paste(missing_params, collapse = ", "))
+  }
+  
+  # Extract configuration
+  snapshot_id <- archive_config$snapshot_id
+  source_path <- archive_config$source_path
+  archive_root <- archive_config$archive_root
+  staging_root <- archive_config$staging_root
+  archive_name <- archive_config$archive_name %||% "data_archive"
+  classification_pattern <- archive_config$classification_pattern %||% "^([^/]+)/([^/]+)/"
+  exclude_patterns <- archive_config$exclude_patterns %||% c("Working Files", "\\.tmp$", "~\\$")
+  
+  message("=== Starting Incremental Archive Process ===")
+  message("Snapshot ID: ", snapshot_id)
+  message("Source Path: ", source_path)
+  message("Archive Root: ", archive_root)
+  
+  # Setup paths
+  current_staging_path <- path(staging_root, snapshot_id)
+  current_archive_path <- path(archive_root, snapshot_id)
+  current_metadata_file <- path(current_staging_path, paste0(snapshot_id, "_metadata.json"))
+  
+  dir_create(current_staging_path)
+  
+  # Create current snapshot metadata
+  current_metadata <- create_snapshot_metadata(
+    source_path = source_path,
+    snapshot_id = snapshot_id,
+    metadata_file = current_metadata_file,
+    classification_pattern = classification_pattern,
+    exclude_patterns = exclude_patterns
+  )
+  
+  # Find most recent previous snapshot
+  previous_metadata <- NULL
+  if(dir_exists(archive_root)) {
+    existing_snapshots <- dir_ls(archive_root, type = "directory") %>%
+      path_file() %>%
+      sort(decreasing = TRUE)
+    
+    if(length(existing_snapshots) > 0) {
+      previous_snapshot_id <- existing_snapshots[1]
+      previous_metadata_file <- path(archive_root, previous_snapshot_id, paste0(previous_snapshot_id, "_metadata.json"))
+      previous_metadata <- load_snapshot_metadata(previous_metadata_file)
+      message("Comparing against previous snapshot: ", previous_snapshot_id)
+    }
+  }
+  
+  # Compare snapshots
+  comparison_result <- compare_snapshots(current_metadata, previous_metadata)
+  
+  # Create output directories
+  new_files_dir <- path(current_staging_path, "NEW")
+  modified_files_dir <- path(current_staging_path, "MODIFIED")
+  unchanged_files_dir <- path(current_staging_path, "UNCHANGED")
+  
+  dir_create(c(new_files_dir, modified_files_dir, unchanged_files_dir))
+  
+  # Copy files based on classification
+  copy_operations <- list()
+  
+  # Process new files
+  if(nrow(comparison_result$new_files) > 0) {
+    message("Copying ", nrow(comparison_result$new_files), " new files...")
+    new_copy_ops <- comparison_result$new_files %>%
+      mutate(
+        source_file = full_path,
+        dest_dir = path(new_files_dir, category_1, category_2),
+        dest_file = path(dest_dir, file_name),
+        operation_type = "new"
+      )
+    copy_operations <- c(copy_operations, list(new_copy_ops))
+  }
+  
+  # Process modified files
+  if(nrow(comparison_result$modified_files) > 0) {
+    message("Copying ", nrow(comparison_result$modified_files), " modified files...")
+    modified_copy_ops <- comparison_result$modified_files %>%
+      mutate(
+        source_file = full_path,
+        dest_dir = path(modified_files_dir, category_1, category_2),
+        dest_file = path(dest_dir, file_name),
+        operation_type = "modified"
+      )
+    copy_operations <- c(copy_operations, list(modified_copy_ops))
+  }
+  
+  # Create reference links for unchanged files
+  if(nrow(comparison_result$unchanged_files) > 0) {
+    message("Creating references for ", nrow(comparison_result$unchanged_files), " unchanged files...")
+    unchanged_refs <- comparison_result$unchanged_files %>%
+      mutate(
+        reference_path = if(!is.null(previous_metadata)) {
+          path(archive_root, previous_metadata$summary$snapshot_id, "archive", category_1, category_2, file_name)
+        } else {
+          NA_character_
+        },
+        dest_dir = path(unchanged_files_dir, category_1, category_2),
+        operation_type = "reference"
+      )
+    
+    # Save reference information
+    write_csv(unchanged_refs, path(current_staging_path, "unchanged_file_references.csv"))
+  }
+  
+  # Execute copy operations
+  if(length(copy_operations) > 0) {
+    all_copy_ops <- bind_rows(copy_operations)
+    
+    # Create destination directories
+    unique_dirs <- unique(all_copy_ops$dest_dir)
+    walk(unique_dirs, ~ dir_create(.x))
+    
+    # Perform copies
+    copy_results <- all_copy_ops %>%
+      mutate(
+        copy_success = map2_lgl(source_file, dest_file, ~ {
+          tryCatch({
+            file_copy(.x, .y, overwrite = TRUE)
+            TRUE
+          }, error = function(e) {
+            warning("Failed to copy: ", .x, " -> ", .y, " Error: ", e$message)
+            FALSE
+          })
+        })
+      )
+    
+    failed_copies <- copy_results %>%
+      filter(!copy_success)
+    
+    if(nrow(failed_copies) > 0) {
+      warning("Failed to copy ", nrow(failed_copies), " files")
+      write_csv(failed_copies, path(current_staging_path, "failed_copies.csv"))
+    }
+    
+  } else {
+    copy_results <- tibble()
+  }
+  
+  # Create comprehensive report
+  archive_report <- list(
+    snapshot_id = snapshot_id,
+    created_at = as.character(Sys.time()),
+    source_path = source_path,
+    archive_config = archive_config,
+    comparison_summary = comparison_result$summary,
+    files_copied = if(length(copy_operations) > 0) nrow(copy_results %>% filter(copy_success)) else 0,
+    files_failed = if(length(copy_operations) > 0) nrow(copy_results %>% filter(!copy_success)) else 0,
+    metadata_file = current_metadata_file,
+    staging_path = current_staging_path
+  )
+  
+  # Save archive report
+  write_json(archive_report, path(current_staging_path, paste0(snapshot_id, "_archive_report.json")), 
+             pretty = TRUE, auto_unbox = TRUE)
+  
+  # Create summary CSV
+  if(exists("comparison_result")) {
+    summary_df <- bind_rows(
+      comparison_result$new_files %>% mutate(status = "NEW"),
+      comparison_result$modified_files %>% mutate(status = "MODIFIED"),
+      comparison_result$unchanged_files %>% mutate(status = "UNCHANGED")
+    ) %>%
+      select(status, category_1, category_2, relative_path, file_name, size, modified_time) %>%
+      arrange(status, category_1, category_2, relative_path)
+    
+    write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
+  }
+  
+  message("=== Archive Process Complete ===")
+  message("Staging location: ", current_staging_path)
+  message("Files processed: ", current_metadata$summary$total_files)
+  message("Files copied: ", archive_report$files_copied)
+  
+  return(archive_report)
+}
+
+#' Archive Multiple Sources
+#'
+#' Process multiple source directories in a single operation
+#'
+#' @param multi_config List of archive configurations
+#' @param global_snapshot_id Optional global snapshot ID to use for all archives
+#' @return List of archive results
+#' @export
+create_multiple_archives <- function(multi_config, global_snapshot_id = NULL) {
+  
+  if(!is.null(global_snapshot_id)) {
+    multi_config <- map(multi_config, ~ {
+      .x$snapshot_id <- global_snapshot_id
+      .x
+    })
+  }
+  
+  message("=== Processing Multiple Archives ===")
+  message("Number of archives: ", length(multi_config))
+  
+  results <- map(multi_config, create_incremental_archive)
+  names(results) <- map_chr(multi_config, ~ .x$archive_name %||% "unnamed")
+  
+  # Create consolidated report
+  consolidated_report <- list(
+    created_at = as.character(Sys.time()),
+    global_snapshot_id = global_snapshot_id,
+    total_archives = length(results),
+    individual_results = results,
+    summary = list(
+      total_files_processed = sum(map_dbl(results, ~ .x$comparison_summary$new_count + 
+                                                    .x$comparison_summary$modified_count + 
+                                                    .x$comparison_summary$unchanged_count)),
+      total_files_copied = sum(map_dbl(results, ~ .x$files_copied)),
+      total_new_files = sum(map_dbl(results, ~ .x$comparison_summary$new_count)),
+      total_modified_files = sum(map_dbl(results, ~ .x$comparison_summary$modified_count))
+    )
+  )
+  
+  message("=== Multiple Archive Process Complete ===")
+  message("Total files processed: ", consolidated_report$summary$total_files_processed)
+  message("Total files copied: ", consolidated_report$summary$total_files_copied)
+  
+  return(consolidated_report)
 }
