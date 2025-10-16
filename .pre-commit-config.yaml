@@ -1,0 +1,129 @@
+# This file configures pre-commit hooks for the repository.
+# It defines the tools and checks that will run automatically before each
+# commit, helping to enforce code quality, formatting, and best practices.
+# For more information, see:
+#   https://pre-commit.com/
+---
+fail_fast: false
+minimum_pre_commit_version: "2.6.0"
+
+ci:
+    autofix_commit_msg: 'chore(pre-commit.ci): Auto fixes [...]'
+    autoupdate_commit_msg: 'chore(pre-commit.ci): Auto update of pre-commit hooks'
+
+repos:
+  # All available hooks: https://pre-commit.com/hooks.html
+  # R specific hooks: https://github.com/lorenzwalthert/precommit
+  - repo: https://github.com/lorenzwalthert/precommit
+    rev: v0.4.3.9014
+    hooks:
+      - id: style-files
+        args: [--style_pkg=styler, --style_fun=tidyverse_style, --cache-root=styler-perm]
+        exclude: >
+          (?x)^(
+          tests/testthat/in/.*|
+          renv/.*
+          )$
+      - id: roxygenize
+        additional_dependencies:
+          -  cli
+          -  fs
+          -  here
+          -  magrittr
+          -  purrr
+          -  R.cache
+          -  rlang
+          -  rprojroot
+          -  rstudioapi
+          -  withr
+          -  yaml
+          -  r-lib/pkgapi
+      # codemeta must be above use-tidy-description when both are used
+      # - id: codemeta-description-updated
+      # - id: use-tidy-description
+      # - id: spell-check
+      #   exclude: >
+      #     (?x)^(
+      #     .*\.[rR]|
+      #     .*\.feather|
+      #     .*\.jpeg|
+      #     .*\.json|
+      #     .*\.mdlrc|
+      #     .*\.pdf|
+      #     .*\.png|
+      #     .*\.py|
+      #     .*\.RData|
+      #     .*\.rds|
+      #     .*\.Rds|
+      #     .*\.Rproj|
+      #     .*\.sh|
+      #     .*\.yml|
+      #     (.*/|)\.gitignore|
+      #     (.*/|)\.pre-commit-.*|
+      #     (.*/|)\.Rbuildignore|
+      #     (.*/|)\.Renviron|
+      #     (.*/|)\.Rprofile|
+      #     (.*/|)CHANGELOG\.md|
+      #     (.*/|)CODEOWNERS.*|
+      #     (.*/|)LICENSE.*|
+      #     (.*/|)NAMESPACE|
+      #     (.*/|)renv/settings\.dcf|
+      #     (.*/|)renv\.lock|
+      #     (.*/|)WORDLIST|
+      #     data/.*|
+      #     inst/hooks/.*|
+      #     inst/pre-commit-.*|
+      #     inst/usethis-legacy-hook|
+      #     renv/.*|
+      #     revdep/.*|
+      #     tests/testthat/in/.*|
+      #     )$
+      - id: readme-rmd-rendered
+      - id: parsable-R
+        exclude: >
+          (?x)^(
+          tests/testthat/in/.*|
+          )$
+      - id: no-browser-statement
+        exclude: >
+          (?x)^(
+          tests/testthat/in/.*|
+          )$
+      - id: no-debug-statement
+        exclude: >
+          (?x)^(
+          tests/testthat/in/.*|
+          )$
+      # - id: deps-in-desc
+      #   exclude: >
+      #     (?x)^(
+      #     inst/hooks/exported/pkgdown.R|
+      #     tests/testthat/in/.*|
+      #     inst/update-renv-prepare.R|
+      #     inst/update-ppm-url.R|
+      #     inst/update-dependency-graph-existing-packages\.R|
+      #     inst/update-existing-hook-dependencies\.R|
+      #     renv/activate.R|
+      #     vignettes/FAQ\.Rmd|
+      #     )$
+      - id: pkgdown
+
+  # https://pre-commit.com/hooks.html
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # - id: check-illegal-windows-names
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-xml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.45.0
+    hooks:
+      - id: markdownlint-fix
+        exclude: ^(CHANGELOG|LICENSE|BLANK_README|.github/).*$

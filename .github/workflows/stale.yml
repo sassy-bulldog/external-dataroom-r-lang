@@ -1,0 +1,29 @@
+# version: 1.0.0
+# Name as it appears on the Actions tab of GitHub
+# (for current repo; this get's ignored if called from another repo)
+---
+name: 'Issue & PR Maintenance'
+
+permissions:
+  contents: read
+
+# Controls when the workflow will run
+on:
+  push:
+    # Sequence of patterns matched against refs/heads
+    branches:
+      - main
+    paths:
+      - .github/workflows/stale.yml
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  stale:
+    name: Shared Workflow
+    permissions:
+      issues: write
+      pull-requests: write
+    # yamllint disable-line rule:line-length
+    uses: sassy-bulldog/.github/.github/workflows/stale.yml@v0.3.1 # x-release-please-version
+    secrets: inherit
