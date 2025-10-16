@@ -1,33 +1,39 @@
 # Configuration Examples for Incremental Data Room Archive System
 
-## Example 1: Simple Single Archive
+# Load required functions
+# Load main functions
+if(file.exists("../dataroom_functions.R")) {
+  source("../dataroom_functions.R")  # From examples/ subdirectory
+} else if(file.exists("dataroom_functions.R")) {
+  source("dataroom_functions.R")      # From project root
+} else {
+  stop("Cannot find dataroom_functions.R - ensure you're in the correct directory")
+}  # Adjust path as needed
 
-```r
+# Example 1: Simple Single Archive
+
 # Basic underwriting archive configuration
 underwriting_config <- list(
   archive_name = "underwriting",
   snapshot_id = "2025Q2",
-  source_path = "Z:/source/underwriting/2025Q2/",
-  archive_root = "Z:/archive/underwriting/",
-  staging_root = "Z:/staging/",
+  source_path = "/mnt/z/source/underwriting/2025Q2/",
+  archive_root = "/mnt/z/archive/underwriting/",
+  staging_root = "../temp_staging/",
   classification_pattern = "^([^/]+)/([^/]+)/",  # Captures segment/deal
   exclude_patterns = c("Working Files", "\\.tmp$", "~\\$", "\\.log$")
 )
 
 # Execute single archive
-result <- create_incremental_archive(underwriting_config)
-```
+# result <- create_incremental_archive(underwriting_config)
 
-## Example 2: Multiple Archives with Different Patterns
-
-```r
+# Example 2: Multiple Archives with Different Patterns
 # Configuration for multiple business areas
 multi_config <- list(
   
   # Underwriting files (segment/deal structure)
   underwriting = list(
     archive_name = "underwriting",
-    source_path = "Z:/source/underwriting/current/",
+    source_path = "/mnt/z/source/underwriting/current/",
     classification_pattern = "^([^/]+)/([^/]+)/",
     exclude_patterns = c("Working Files", "backup", "\\.tmp$")
   ),
@@ -35,7 +41,7 @@ multi_config <- list(
   # Claims files (year/month/claim_type structure)  
   claims = list(
     archive_name = "claims",
-    source_path = "Z:/source/claims/processed/",
+    source_path = "/mnt/z/source/claims/processed/",
     classification_pattern = "^([0-9]{4})/([0-9]{2})/([^/]+)/",
     exclude_patterns = c("temp", "draft", "\\.bak$")
   ),
@@ -43,7 +49,7 @@ multi_config <- list(
   # Financial reports (department/period structure)
   financials = list(
     archive_name = "financials", 
-    source_path = "Z:/source/finance/reports/",
+    source_path = "/mnt/z/source/finance/reports/",
     classification_pattern = "^([^/]+)/([0-9]{4}Q[1-4])/",
     exclude_patterns = c("working", "draft", "\\.xlsx~$")
   ),
@@ -51,7 +57,7 @@ multi_config <- list(
   # Legal documents (case/document_type structure)
   legal = list(
     archive_name = "legal",
-    source_path = "Z:/source/legal/documents/",
+    source_path = "/mnt/z/source/legal/documents/",
     classification_pattern = "^([^/]+)/([^/]+)/",
     exclude_patterns = c("confidential", "attorney_work_product")
   )
@@ -59,22 +65,20 @@ multi_config <- list(
 
 # Execute all archives with global settings
 global_snapshot_id <- "2025Q2"
-archive_root <- "Z:/archive/"
-staging_root <- "Z:/staging/"
+archive_root <- "/mnt/z/archive/"
+staging_root <- "/mnt/z/staging/"
 
-results <- create_multiple_archives(multi_config, global_snapshot_id)
-```
+# Execute multiple archives (uncomment to run):
+# results <- create_multiple_archives(multi_config, global_snapshot_id)
 
-## Example 3: Large Scale Archive with Performance Optimization
-
-```r
+# Example 3: Large Scale Archive with Performance Optimization
 # High-performance configuration for large datasets
 large_scale_config <- list(
   archive_name = "enterprise_data",
   snapshot_id = "2025Q2",
-  source_path = "Z:/source/enterprise/",
-  archive_root = "Z:/archive/enterprise/",
-  staging_root = "Z:/staging/",
+  source_path = "/mnt/z/source/enterprise/",
+  archive_root = "/mnt/z/archive/enterprise/",
+  staging_root = "/mnt/z/staging/",
   classification_pattern = "^([^/]+)/([^/]+)/([^/]+)/",  # Three-level hierarchy
   exclude_patterns = c(
     "Working Files", "temp", "backup", "cache",
@@ -92,21 +96,26 @@ large_scale_config <- list(
 )
 
 # Load performance functions
-source("performance_functions.R")
+if(file.exists("../performance_functions.R")) {
+  source("../performance_functions.R")  # From examples/ subdirectory
+} else if(file.exists("performance_functions.R")) {
+  source("performance_functions.R")      # From project root
+} else {
+  stop("Cannot find performance_functions.R - ensure you're in the correct directory")
+}
 
-# Execute with performance monitoring
-start_time <- Sys.time()
-result <- create_incremental_archive(large_scale_config)
-end_time <- Sys.time()
+# Execute with performance monitoring (uncomment to run):
+# start_time <- Sys.time()
+# result <- create_incremental_archive(large_scale_config)
+# end_time <- Sys.time()
+# 
+# cat("Processing completed in:", round(end_time - start_time, 2), "minutes\n")
+# cat("Files processed:", result$comparison_summary$total_files, "\n")
+# cat("Files copied:", result$files_copied, "\n")
 
-cat("Processing completed in:", round(end_time - start_time, 2), "minutes\n")
-cat("Files processed:", result$comparison_summary$total_files, "\n")
-cat("Files copied:", result$files_copied, "\n")
-```
+# Example 4: Custom Classification Patterns
 
-## Example 4: Custom Classification Patterns
-
-```r
+# Example 4: Custom Classification Patterns
 # Different classification patterns for various business needs
 
 # Pattern 1: Year/Month/Department/Project
@@ -124,15 +133,12 @@ pattern_4 <- "^([^/]+)/([^/]+)/"
 # Example usage with custom pattern
 custom_config <- list(
   archive_name = "client_services",
-  source_path = "Z:/client_data/",
+  source_path = "/mnt/z/client_data/",
   classification_pattern = pattern_3,  # Client/Service/Date
   exclude_patterns = c("internal", "draft", "\\.tmp$")
 )
-```
 
-## Example 5: Scheduled Automation with Error Handling
-
-```r
+# Example 5: Scheduled Automation with Error Handling
 # Scheduled archive function with comprehensive error handling
 automated_archive <- function(config_file = "archive_config.json") {
   
@@ -209,17 +215,17 @@ automated_archive <- function(config_file = "archive_config.json") {
 config_json <- list(
   underwriting = list(
     archive_name = "underwriting",
-    source_path = "Z:/source/underwriting/current/",
-    archive_root = "Z:/archive/underwriting/",
-    staging_root = "Z:/staging/",
+    source_path = "/mnt/z/source/underwriting/current/",
+    archive_root = "/mnt/z/archive/underwriting/",
+    staging_root = "/mnt/z/staging/",
     classification_pattern = "^([^/]+)/([^/]+)/",
     exclude_patterns = c("Working Files", "\\.tmp$")
   ),
   claims = list(
     archive_name = "claims",
-    source_path = "Z:/source/claims/current/",
-    archive_root = "Z:/archive/claims/", 
-    staging_root = "Z:/staging/",
+    source_path = "/mnt/z/source/claims/current/",
+    archive_root = "/mnt/z/archive/claims/", 
+    staging_root = "/mnt/z/staging/",
     classification_pattern = "^([^/]+)/([^/]+)/([^/]+)/",
     exclude_patterns = c("temp", "backup")
   )
@@ -230,11 +236,8 @@ jsonlite::write_json(config_json, "archive_config.json", pretty = TRUE, auto_unb
 
 # Run automated archive
 # results <- automated_archive("archive_config.json")
-```
 
-## Example 6: Integration with External Systems
-
-```r
+# Example 6: Integration with External Systems
 # Integration with SharePoint, database logging, and notification systems
 integrated_archive <- function(configs, snapshot_id) {
   
@@ -288,11 +291,8 @@ create_summary_message <- function(results) {
     "Modified Files: ", format(results$summary$total_modified_files, big.mark = ",")
   )
 }
-```
 
-## Example 7: Development and Testing Configuration
-
-```r
+# Example 7: Development and Testing Configuration
 # Development/testing configuration with small datasets
 dev_config <- list(
   test_archive = list(
@@ -358,4 +358,3 @@ setup_test_data <- function(base_path) {
   writeLines("test content 2", file.path(base_path, "segment1", "deal2", "test2.txt"))
   writeLines("test content 3", file.path(base_path, "segment2", "deal1", "test3.txt"))
 }
-```

@@ -1,0 +1,515 @@
+---
+title: "Data Room Archive Configuration Guide"
+author: "External Data Room R Lang Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+  pdf_document:
+    toc: true
+    toc_depth: 3
+params:
+  show_examples: true
+  demo_mode: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  collapse = TRUE,
+  comment = "#>"
+)
+
+# Load required libraries
+library(knitr)
+library(DT)
+library(dplyr)
+library(purrr)
+
+# Source the main functions if available
+if(file.exists("../dataroom_functions.R")) {
+  source("../dataroom_functions.R")
+}
+```
+
+# Overview
+
+This guide provides comprehensive documentation for configuring the **Data Room Archive System**, a powerful R-based solution for creating incremental backups and managing file archives across multiple business areas.
+
+## Key Features
+
+- **Incremental Processing**: Only copies new or modified files
+- **JSON Metadata Caching**: Fast comparisons using MD5 hashes
+- **Multi-Source Support**: Process multiple archives simultaneously  
+- **Flexible Classification**: Custom regex patterns for folder structures
+- **Performance Optimization**: Parallel processing and batch operations
+- **Cross-Platform**: Works on Windows, Linux, and WSL
+
+---
+
+# Configuration Basics
+
+## Core Configuration Structure
+
+Every archive configuration requires these essential elements:
+
+```{r config-structure, eval=FALSE}
+config <- list(
+  archive_name = "your_archive_name",        # Unique identifier
+  source_path = "/path/to/source/",          # Where files come from
+  archive_root = "/path/to/archive/",        # Where archives are stored
+  staging_root = "/path/to/staging/",        # Temporary processing area
+  classification_pattern = "regex_pattern",  # How to organize files
+  exclude_patterns = c("pattern1", "pattern2") # Files to skip
+)
+```
+
+## Path Configuration
+
+### Windows Paths
+```{r windows-paths, eval=FALSE}
+source_path = "Z:/source/underwriting/current/"
+archive_root = "Z:/archive/underwriting/"
+staging_root = "Z:/staging/"
+```
+
+### WSL/Linux Paths  
+```{r wsl-paths, eval=FALSE}
+source_path = "/mnt/z/source/underwriting/current/"
+archive_root = "/mnt/z/archive/underwriting/"
+staging_root = "/mnt/z/staging/"
+```
+
+---
+
+# Classification Patterns
+
+Classification patterns determine how files are organized in the archive. They use regular expressions with capture groups.
+
+## Common Patterns
+
+### Two-Level Hierarchy (Segment/Deal)
+```{r pattern-two-level, eval=FALSE}
+classification_pattern = "^([^/]+)/([^/]+)/"
+# Matches: SegmentA/Deal123/file.pdf → Groups: ["SegmentA", "Deal123"]
+```
+
+### Three-Level Hierarchy (Year/Month/Type)
+```{r pattern-three-level, eval=FALSE}
+classification_pattern = "^([0-9]{4})/([0-9]{2})/([^/]+)/"
+# Matches: 2025/03/Claims/file.xlsx → Groups: ["2025", "03", "Claims"]
+```
+
+### Date-Based Pattern
+```{r pattern-date, eval=FALSE}
+classification_pattern = "^([^/]+)/([^/]+)/([0-9]{4}-[0-9]{2}-[0-9]{2})/"
+# Matches: ClientA/Service/2025-03-15/file.doc → Groups: ["ClientA", "Service", "2025-03-15"]
+```
+
+### Complex Business Pattern
+```{r pattern-complex, eval=FALSE}
+classification_pattern = "^([^/]+)/([0-9]{4}Q[1-4])/([^/]+)/"
+# Matches: Finance/2025Q1/Reports/file.xlsx → Groups: ["Finance", "2025Q1", "Reports"]
+```
+
+## Pattern Testing
+
+```{r pattern-testing, eval=params$show_examples}
+# Example: Test a classification pattern
+test_pattern <- "^([^/]+)/([0-9]{4}Q[1-4])/"
+test_paths <- c(
+  "Finance/2025Q1/report.xlsx",
+  "Legal/2025Q2/contract.pdf", 
+  "Invalid/NotAQuarter/file.txt"
+)
+
+# Test the pattern
+results <- data.frame(
+  path = test_paths,
+  matches = grepl(test_pattern, test_paths),
+  groups = ifelse(
+    grepl(test_pattern, test_paths),
+    gsub(test_pattern, "\\1, \\2", test_paths),
+    "No match"
+  )
+)
+
+kable(results, caption = "Pattern Testing Results")
+```
+
+---
+
+# Practical Examples
+
+## Example 1: Simple Underwriting Archive
+
+This is the most basic configuration for underwriting files organized by segment and deal:
+
+```{r example-basic, eval=FALSE}
+# Load the functions
+source("../dataroom_functions.R")
+
+# Basic underwriting configuration  
+underwriting_config <- list(
+  archive_name = "underwriting",
+  snapshot_id = "2025Q4",
+  source_path = "/mnt/z/source/underwriting/current/",
+  archive_root = "/mnt/z/archive/underwriting/",
+  staging_root = "/mnt/z/staging/",
+  classification_pattern = "^([^/]+)/([^/]+)/",
+  exclude_patterns = c("Working Files", "backup", "\\.tmp$")
+)
+
+# Execute the archive
+result <- create_incremental_archive(underwriting_config)
+```
+
+## Example 2: Multi-Business Area Setup
+
+For organizations with multiple business areas that need separate archives:
+
+```{r example-multi, eval=FALSE}
+# Multi-archive configuration
+multi_config <- list(
+  underwriting = list(
+    archive_name = "underwriting",
+    source_path = "/mnt/z/source/underwriting/current/",
+    classification_pattern = "^([^/]+)/([^/]+)/",
+    exclude_patterns = c("Working Files", "backup", "\\.tmp$")
+  ),
+  
+  claims = list(
+    archive_name = "claims", 
+    source_path = "/mnt/z/source/claims/processed/",
+    classification_pattern = "^([0-9]{4})/([0-9]{2})/([^/]+)/",
+    exclude_patterns = c("temp", "draft", "\\.bak$")
+  ),
+  
+  financials = list(
+    archive_name = "financials",
+    source_path = "/mnt/z/source/finance/reports/",
+    classification_pattern = "^([^/]+)/([0-9]{4}Q[1-4])/",
+    exclude_patterns = c("working", "draft", "\\.xlsx~$")
+  )
+)
+
+# Global settings
+global_snapshot_id <- "2025Q4"
+archive_root <- "/mnt/z/archive/"
+staging_root <- "/mnt/z/staging/"
+
+# Execute all archives
+results <- create_multiple_archives(multi_config, global_snapshot_id)
+```
+
+## Example 3: High-Performance Configuration
+
+For large datasets requiring optimization:
+
+```{r example-performance, eval=FALSE}
+# Load performance functions
+source("../performance_functions.R")
+
+# High-performance configuration
+large_scale_config <- list(
+  archive_name = "enterprise_data",
+  snapshot_id = "2025Q4", 
+  source_path = "/mnt/z/source/enterprise/",
+  archive_root = "/mnt/z/archive/enterprise/",
+  staging_root = "/mnt/z/staging/",
+  classification_pattern = "^([^/]+)/([^/]+)/([^/]+)/",
+  exclude_patterns = c(
+    "Working Files", "temp", "backup", "cache",
+    "\\.tmp$", "\\.bak$", "\\.log$", "~\\$.*"
+  ),
+  
+  # Performance settings
+  use_parallel_processing = TRUE,
+  max_workers = 6,
+  batch_size = 100,
+  quick_comparison_mode = FALSE,
+  enable_cache_management = TRUE,
+  max_cache_age_days = 30
+)
+
+# Execute with timing
+start_time <- Sys.time()
+result <- create_incremental_archive(large_scale_config)
+end_time <- Sys.time()
+
+cat("Processing completed in:", round(end_time - start_time, 2), "minutes\n")
+```
+
+---
+
+# Advanced Configuration Options
+
+## Exclude Patterns
+
+Exclude patterns use regular expressions to skip unwanted files:
+
+```{r exclude-patterns-table, echo=FALSE}
+exclude_examples <- data.frame(
+  Pattern = c(
+    "\\\\.tmp$",
+    "\\\\.bak$", 
+    "Working Files",
+    "~\\\\$.*",
+    "thumbs\\\\.db",
+    "backup",
+    "^temp"
+  ),
+  Description = c(
+    "Files ending in .tmp",
+    "Backup files ending in .bak",
+    "Folders named 'Working Files'", 
+    "Excel temporary files (~$filename)",
+    "Windows thumbnail cache files",
+    "Any folder named 'backup'",
+    "Files/folders starting with 'temp'"
+  ),
+  Example = c(
+    "document.tmp",
+    "data.bak",
+    "Working Files/draft.docx", 
+    "~$spreadsheet.xlsx",
+    "thumbs.db",
+    "backup/old_file.pdf",
+    "temp_analysis.xlsx"
+  )
+)
+
+kable(exclude_examples, caption = "Common Exclude Patterns")
+```
+
+## Performance Settings
+
+```{r performance-settings-table, echo=FALSE}
+performance_options <- data.frame(
+  Setting = c(
+    "use_parallel_processing",
+    "max_workers",
+    "batch_size", 
+    "quick_comparison_mode",
+    "enable_cache_management",
+    "max_cache_age_days"
+  ),
+  Type = c("logical", "integer", "integer", "logical", "logical", "integer"),
+  Default = c("FALSE", "4", "50", "TRUE", "FALSE", "7"),
+  Description = c(
+    "Enable parallel file processing",
+    "Number of worker processes", 
+    "Files processed per batch",
+    "Use file size/date vs full hash comparison",
+    "Automatically clean old cache files",
+    "Days to keep cache files"
+  )
+)
+
+kable(performance_options, caption = "Performance Configuration Options")
+```
+
+---
+
+# Automation and Scheduling
+
+## Scheduled Automation Function
+
+```{r automation-example, eval=FALSE}
+# Automated archive with error handling
+automated_archive <- function(config_file = "archive_config.json") {
+  tryCatch({
+    # Load configuration
+    configs <- jsonlite::read_json(config_file, simplifyVector = TRUE)
+    
+    # Generate snapshot ID
+    snapshot_id <- paste0(year(Sys.Date()), "Q", quarter(Sys.Date()))
+    
+    # Create log file
+    log_file <- file.path("logs", paste0("archive_", snapshot_id, "_", 
+                                        format(Sys.time(), "%Y%m%d_%H%M%S"), ".log"))
+    dir.create("logs", showWarnings = FALSE)
+    
+    # Execute archives
+    results <- create_multiple_archives(configs, snapshot_id)
+    
+    return(results)
+    
+  }, error = function(e) {
+    message("Archive process failed: ", e$message)
+    stop(e)
+  })
+}
+```
+
+## Configuration File Format
+
+Save configurations as JSON for automated processing:
+
+```{r json-config, eval=FALSE}
+# Create JSON configuration
+config_json <- list(
+  underwriting = list(
+    archive_name = "underwriting",
+    source_path = "/mnt/z/source/underwriting/current/",
+    archive_root = "/mnt/z/archive/underwriting/", 
+    staging_root = "/mnt/z/staging/",
+    classification_pattern = "^([^/]+)/([^/]+)/",
+    exclude_patterns = c("Working Files", "\\.tmp$")
+  )
+)
+
+# Save to file
+jsonlite::write_json(config_json, "archive_config.json", 
+                    pretty = TRUE, auto_unbox = TRUE)
+```
+
+---
+
+# Testing and Development
+
+## Development Configuration
+
+For testing with smaller datasets:
+
+```{r dev-config, eval=FALSE}
+# Development/testing configuration
+dev_config <- list(
+  test_archive = list(
+    archive_name = "test_data",
+    source_path = "/tmp/test_source/",
+    archive_root = "/tmp/test_archive/",
+    staging_root = "/tmp/test_staging/",
+    classification_pattern = "^([^/]+)/([^/]+)/",
+    exclude_patterns = c("test_*", "\\.tmp$"),
+    
+    # Development settings
+    max_files_per_category = 100,
+    dry_run = FALSE,
+    verbose_logging = TRUE
+  )
+)
+```
+
+## Test Validation Function
+
+```{r validation-function, eval=FALSE}
+# Validate archive results
+validate_archive_results <- function(result) {
+  checks <- list(
+    metadata_exists = file.exists(result$metadata_file),
+    staging_exists = dir.exists(result$staging_path),
+    no_copy_failures = result$files_failed == 0,
+    reasonable_file_count = result$files_copied >= 0 && result$files_copied <= 1000
+  )
+  
+  list(
+    checks = unlist(checks),
+    failures = names(checks)[!unlist(checks)]
+  )
+}
+```
+
+---
+
+# Troubleshooting
+
+## Common Issues
+
+### Path Problems
+- **Windows vs WSL**: Convert `Z:/` to `/mnt/z/`
+- **Trailing Slashes**: Always include trailing slashes in directory paths
+- **Permissions**: Ensure R has read/write access to all paths
+
+### Pattern Issues  
+- **Escaping**: Use `\\\\` for literal backslashes in R strings
+- **Testing**: Test patterns with small datasets first
+- **Capture Groups**: Ensure patterns have proper capture groups `()`
+
+### Performance Issues
+- **Large Datasets**: Enable parallel processing
+- **Network Drives**: Consider local staging areas
+- **Memory Usage**: Use batch processing for very large archives
+
+## Debugging Tips
+
+```{r debugging, eval=FALSE}
+# Enable verbose logging
+options(dataroom.verbose = TRUE)
+
+# Test classification patterns
+test_paths <- list.files(source_path, recursive = TRUE, full.names = TRUE)
+sample_paths <- head(test_paths, 10)
+matches <- str_match(sample_paths, classification_pattern)
+print(matches)
+
+# Check file permissions
+file.info(source_path)$mode
+file.access(archive_root, 2)  # Check write access
+```
+
+---
+
+# Integration Examples
+
+## SharePoint Integration
+
+```{r sharepoint-integration, eval=FALSE}
+# Upload metadata to SharePoint after archiving
+upload_to_sharepoint <- function(metadata_file, archive_name, snapshot_id) {
+  # Implementation depends on your SharePoint setup
+  message("Uploading metadata for: ", archive_name, " - ", snapshot_id)
+}
+```
+
+## Database Logging
+
+```{r database-logging, eval=FALSE}
+# Log archive events to database
+log_to_database <- function(event_type, snapshot_id, timestamp, 
+                           archive_name = NULL, files_copied = NULL) {
+  # Implementation depends on your database setup
+  message("Database log: ", event_type, " - ", snapshot_id)
+}
+```
+
+## Notification System
+
+```{r notification-system, eval=FALSE}
+# Send Teams notification
+send_teams_notification <- function(message) {
+  # Implement Teams webhook notification
+  message("Teams notification: ", message)
+}
+```
+
+---
+
+# Conclusion
+
+The Data Room Archive System provides a flexible, scalable solution for managing file archives across multiple business areas. Key benefits include:
+
+- **Efficiency**: Incremental processing saves time and storage
+- **Reliability**: Comprehensive error handling and validation
+- **Flexibility**: Customizable patterns and configurations  
+- **Performance**: Parallel processing and optimization options
+- **Integration**: APIs for external systems and automation
+
+For additional support, refer to the main project documentation or the `examples/README.md` file.
+
+---
+
+## Session Information
+
+```{r session-info}
+sessionInfo()
+```
