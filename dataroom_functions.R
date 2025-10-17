@@ -137,21 +137,66 @@ load_snapshot_metadata <- function(metadata_file) {
   })
 }
 
+#' Mark Duplicate Files
+#'
+#' Identifies files with duplicate content (same md5_hash and size) and marks them.
+#' The primary file (earliest modified_time, or shortest path if tied) is not marked.
+#' All other duplicates are marked with is_duplicate=TRUE and duplicate_of pointing to primary.
+#'
+#' @param files_df Tibble containing file metadata with content_key, modified_time, relative_path
+#' @return Tibble with added columns: is_duplicate (logical) and duplicate_of (character)
+#' @export
+mark_duplicates <- function(files_df) {
+  if(nrow(files_df) == 0 || !"content_key" %in% names(files_df)) {
+    return(files_df %>% mutate(is_duplicate = FALSE, duplicate_of = NA_character_))
+  }
+  
+  # Group by content_key to find duplicates
+  files_with_dup_info <- files_df %>%
+    group_by(content_key) %>%
+    mutate(
+      duplicate_count = n(),
+      # Sort within group: earliest modified_time, then shortest path
+      sort_key = paste(modified_time, str_length(relative_path), relative_path, sep = "|")
+    ) %>%
+    arrange(content_key, sort_key) %>%
+    mutate(
+      # First file in each group is the primary
+      is_primary = row_number() == 1,
+      # Primary file path for this content
+      primary_path = first(relative_path)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      is_duplicate = duplicate_count > 1 & !is_primary,
+      duplicate_of = if_else(is_duplicate, primary_path, NA_character_)
+    ) %>%
+    select(-duplicate_count, -sort_key, -is_primary, -primary_path)
+  
+  return(files_with_dup_info)
+}
+
 #' Compare Snapshots and Identify Changes
 #'
 #' Compares current source against previous snapshot metadata to identify
-#' new, modified, and unchanged files
+#' new, modified, and unchanged files. Also detects duplicate content.
 #'
 #' @param current_metadata Current snapshot metadata
 #' @param previous_metadata Previous snapshot metadata (can be NULL)
+#' @param verbose Logical, whether to print progress messages (default TRUE)
 #' @return List containing categorized file information
 #' @export
-compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
+compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbose = TRUE) {
   
   if(is.null(previous_metadata) || is.null(previous_metadata$files) || nrow(previous_metadata$files) == 0) {
-    message("No previous snapshot found - all files will be treated as new")
+    if(verbose) message("No previous snapshot found - all files will be treated as new")
+    
+    # Mark duplicates in the new files
+    new_files_with_dups <- mark_duplicates(current_metadata$files)
+    dup_count <- sum(new_files_with_dups$is_duplicate, na.rm = TRUE)
+    
     return(list(
-      new_files = current_metadata$files,
+      new_files = new_files_with_dups,
       modified_files = tibble(),
       renamed_files = tibble(),
       reintroduced_files = tibble(),
@@ -163,7 +208,8 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
         renamed_count = 0,
         reintroduced_count = 0,
         unchanged_count = 0,
-        removed_count = 0
+        removed_count = 0,
+        duplicate_count = dup_count
       )
     ))
   }
@@ -318,22 +364,44 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
   
   removed_files <- bind_rows(newly_removed, still_removed)
   
+  # Mark duplicates in each category (for active files only)
+  new_files <- mark_duplicates(new_files)
+  modified_files <- mark_duplicates(modified_files)
+  renamed_files <- mark_duplicates(renamed_files)
+  reintroduced_files <- mark_duplicates(reintroduced_files)
+  unchanged_files <- mark_duplicates(unchanged_files)
+  
+  # Count duplicates across all active files
+  total_duplicates <- sum(
+    sum(new_files$is_duplicate, na.rm = TRUE),
+    sum(modified_files$is_duplicate, na.rm = TRUE),
+    sum(renamed_files$is_duplicate, na.rm = TRUE),
+    sum(reintroduced_files$is_duplicate, na.rm = TRUE),
+    sum(unchanged_files$is_duplicate, na.rm = TRUE)
+  )
+  
   summary_info <- list(
     new_count = nrow(new_files),
     modified_count = nrow(modified_files),
     renamed_count = nrow(renamed_files),
     reintroduced_count = nrow(reintroduced_files),
     unchanged_count = nrow(unchanged_files),
-    removed_count = nrow(removed_files)
+    removed_count = nrow(removed_files),
+    duplicate_count = total_duplicates
   )
   
-  message("Comparison complete:")
-  message("  New files: ", summary_info$new_count)
-  message("  Modified files: ", summary_info$modified_count)
-  message("  Renamed files: ", summary_info$renamed_count)
-  message("  Reintroduced files: ", summary_info$reintroduced_count)
-  message("  Unchanged files: ", summary_info$unchanged_count)
-  message("  Removed files: ", summary_info$removed_count)
+  if(verbose) {
+    message("Comparison complete:")
+    message("  New files: ", summary_info$new_count)
+    message("  Modified files: ", summary_info$modified_count)
+    message("  Renamed files: ", summary_info$renamed_count)
+    message("  Reintroduced files: ", summary_info$reintroduced_count)
+    message("  Unchanged files: ", summary_info$unchanged_count)
+    message("  Removed files: ", summary_info$removed_count)
+    if(total_duplicates > 0) {
+      message("  Duplicate files detected: ", total_duplicates)
+    }
+  }
   
   return(list(
     new_files = new_files,
@@ -577,7 +645,8 @@ create_incremental_archive <- function(archive_config) {
     
     if(length(summary_components) > 0) {
       summary_df <- bind_rows(summary_components) %>%
-        select(status, category_1, category_2, relative_path, file_name, size, modified_time) %>%
+        select(status, category_1, category_2, relative_path, file_name, size, modified_time, 
+               is_duplicate, duplicate_of) %>%
         arrange(status, category_1, category_2, relative_path)
       
       write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
