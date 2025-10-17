@@ -769,3 +769,28 @@ override.tf.json
 
 ## Include tfplan files to ignore the plan output of command: terraform plan -out=tfplan
 # example: *tfplan*
+
+# Data Room Archive System - Temporary/Working Files
+## Temporary staging directory for archive processing
+temp_staging/
+
+## Archive processing temporary files
+*_metadata.json
+*_archive_report.json
+*_file_summary.csv
+unchanged_file_references.csv
+RAW_INFO_*.txt
+hash.txt
+
+## R temporary and cache files
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+*-Ex.R
+*.Rcheck/
+*.Rproj.user/
+
+## Archive processing logs
+*.log
+archive_*.log

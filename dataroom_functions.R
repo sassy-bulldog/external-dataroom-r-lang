@@ -62,7 +62,7 @@ create_snapshot_metadata <- function(
           full_path = as.character(file_path),
           relative_path = as.character(rel_path),
           file_name = path_file(file_path),
-          size = file_info$size,
+          size = as.numeric(file_info$size),
           modified_time = as.character(file_info$modification_time),
           md5_hash = digest(file = file_path, algo = "md5"),
           category_1 = if(!is.na(classification[2])) classification[2] else "uncategorized",
@@ -153,11 +153,15 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
     return(list(
       new_files = current_metadata$files,
       modified_files = tibble(),
+      renamed_files = tibble(),
+      reintroduced_files = tibble(),
       unchanged_files = tibble(),
       removed_files = tibble(),
       summary = list(
         new_count = nrow(current_metadata$files),
         modified_count = 0,
+        renamed_count = 0,
+        reintroduced_count = 0,
         unchanged_count = 0,
         removed_count = 0
       )
@@ -165,62 +169,160 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
   }
   
   current_files <- current_metadata$files
-  previous_files <- previous_metadata$files
   
-  # Create comparison keys
-  current_files <- current_files %>%
-    mutate(comparison_key = paste(relative_path, size, modified_time, sep = "|"))
-  
-  previous_files <- previous_files %>%
-    mutate(comparison_key = paste(relative_path, size, modified_time, sep = "|"))
-  
-  # Identify file categories
-  unchanged_files <- current_files %>%
-    inner_join(previous_files, by = "comparison_key", suffix = c("", "_prev")) %>%
-    select(all_of(names(current_files)[names(current_files) != "comparison_key"]))
-  
-  # Files that exist in current but not in previous (by path)
-  potential_new <- current_files %>%
-    anti_join(previous_files, by = "relative_path")
-  
-  # Files that exist in both locations but with different content
-  potential_modified <- current_files %>%
-    inner_join(previous_files, by = "relative_path", suffix = c("", "_prev")) %>%
-    filter(comparison_key != comparison_key_prev) %>%
-    select(all_of(names(current_files)[names(current_files) != "comparison_key"]))
-  
-  # Check for renamed files (same content, different path)
-  renamed_files <- tibble()
-  if(nrow(potential_new) > 0 && nrow(previous_files) > 0) {
-    # Match by md5_hash and size to find potential renames
-    potential_renames <- potential_new %>%
-      inner_join(
-        previous_files %>% 
-          anti_join(current_files, by = "relative_path"),
-        by = c("md5_hash", "size"),
-        suffix = c("", "_prev")
-      ) %>%
-      mutate(
-        change_type = "renamed",
-        previous_path = relative_path_prev
-      )
+  # Handle previous files: include both active and previously removed files
+  # Previous files might have status field indicating if they were removed in earlier quarters
+  if(!is.null(previous_metadata$files) && length(previous_metadata$files) > 0) {
+    previous_files_df <- as_tibble(previous_metadata$files)
     
-    renamed_files <- potential_renames
-    
-    # Remove renamed files from potential_new
-    potential_new <- potential_new %>%
-      anti_join(potential_renames, by = c("relative_path", "md5_hash", "size"))
+    if("status" %in% names(previous_files_df)) {
+      previous_active <- previous_files_df %>% 
+        filter(is.na(status) | status != "removed")
+      previous_removed <- previous_files_df %>% 
+        filter(!is.na(status) & status == "removed")
+    } else {
+      previous_active <- previous_files_df
+      previous_removed <- tibble()
+    }
+  } else {
+    previous_active <- tibble()
+    previous_removed <- tibble()
   }
   
-  # Files that existed previously but not in current
-  removed_files <- previous_files %>%
-    anti_join(current_files, by = "relative_path") %>%
-    anti_join(renamed_files, by = c("relative_path" = "previous_path"))
+  # Create comparison keys for content matching
+  current_files <- current_files %>%
+    mutate(content_key = paste(md5_hash, size, sep = "|"))
+  
+  previous_active <- previous_active %>%
+    mutate(content_key = paste(md5_hash, size, sep = "|"))
+  
+  # 1. UNCHANGED: Exact content match (md5_hash + size) at same path
+  unchanged_files <- tibble()
+  if(all(c("relative_path", "content_key") %in% names(previous_active))) {
+    unchanged_files <- current_files %>%
+      inner_join(previous_active, by = c("relative_path", "content_key"), suffix = c("", "_prev")) %>%
+      select(all_of(names(current_files)[names(current_files) != "content_key"]))
+  }
+  
+  # 2. MODIFIED: Same path, different content
+  modified_files <- tibble()
+  if("relative_path" %in% names(previous_active)) {
+    modified_files <- current_files %>%
+      inner_join(previous_active, by = "relative_path", suffix = c("", "_prev")) %>%
+      filter(content_key != content_key_prev) %>%
+      select(all_of(names(current_files)[names(current_files) != "content_key"]))
+  }
+  
+  # 3. Files at new paths (potential new, renamed, or reintroduced)
+  files_at_new_paths <- current_files %>%
+    anti_join(previous_active, by = "relative_path")
+  
+  # 4. RENAMED: Same content (md5_hash + size), different path
+  renamed_files <- tibble()
+  reintroduced_files <- tibble()
+  
+  if(nrow(files_at_new_paths) > 0) {
+    # Files that were at old paths but not at current paths (candidates for rename source)
+    files_at_old_paths <- previous_active %>%
+      anti_join(current_files, by = "relative_path")
+    
+    # Primary match: exact content match (md5_hash + size)
+    exact_content_matches <- tibble()
+    if("content_key" %in% names(files_at_new_paths) && "content_key" %in% names(files_at_old_paths)) {
+      exact_content_matches <- files_at_new_paths %>%
+        inner_join(files_at_old_paths, by = "content_key", suffix = c("", "_prev"), relationship = "many-to-many") %>%
+        mutate(
+          change_type = "renamed",
+          previous_path = relative_path_prev,
+          match_confidence = "exact_content"
+        )
+    }
+
+    renamed_files <- exact_content_matches
+    
+    # Check for reintroduced files (content matches previously removed files)
+    if(nrow(previous_removed) > 0 && "md5_hash" %in% names(previous_removed) && "size" %in% names(previous_removed)) {
+      previous_removed <- previous_removed %>%
+        mutate(content_key = paste(md5_hash, size, sep = "|"))
+      
+      remaining_new_paths <- files_at_new_paths %>%
+        anti_join(renamed_files, by = "relative_path")
+      
+      if(nrow(remaining_new_paths) > 0) {
+        reintroduced_matches <- tibble()
+        if("content_key" %in% names(previous_removed) && "content_key" %in% names(remaining_new_paths)) {
+          reintroduced_matches <- remaining_new_paths %>%
+            inner_join(previous_removed, by = "content_key", suffix = c("", "_removed")) %>%
+            mutate(
+              change_type = "reintroduced",
+              first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter_removed else NA_character_,
+              original_path = relative_path_removed
+            ) %>%
+            select(all_of(c(names(current_files)[names(current_files) != "content_key"], 
+                           "change_type", "first_removed_quarter", "original_path")))
+        }
+        
+        reintroduced_files <- reintroduced_matches
+      }
+    }
+  }
+  
+  # 5. NEW: Files that don't match any previous content
+  new_files <- files_at_new_paths
+  if(nrow(renamed_files) > 0 && "relative_path" %in% names(renamed_files)) {
+    new_files <- new_files %>% anti_join(renamed_files, by = "relative_path")
+  }
+  if(nrow(reintroduced_files) > 0 && "relative_path" %in% names(reintroduced_files)) {
+    new_files <- new_files %>% anti_join(reintroduced_files, by = "relative_path")
+  }
+  
+  # 6. REMOVED: Carry forward previously removed + newly removed
+  # Newly removed files (were active, now missing)
+  newly_removed <- previous_active %>%
+    anti_join(current_files, by = "relative_path")
+  
+  # Only filter out renamed files if there are any
+  if(nrow(renamed_files) > 0 && "previous_path" %in% names(renamed_files)) {
+    newly_removed <- newly_removed %>%
+      anti_join(renamed_files, by = c("relative_path" = "previous_path"))
+  }
+  
+  newly_removed <- newly_removed %>%
+    mutate(
+      status = "removed",
+      first_removed_quarter = current_metadata$summary$snapshot_id
+    )
+  
+  # Carry forward previously removed files (still missing)
+  still_removed <- tibble()
+  if(nrow(previous_removed) > 0 && nrow(reintroduced_files) == 0) {
+    still_removed <- previous_removed %>%
+      mutate(
+        status = "removed",
+        first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter else current_metadata$summary$snapshot_id
+      ) %>%
+      select(any_of(names(newly_removed)))
+  } else if(nrow(previous_removed) > 0 && nrow(reintroduced_files) > 0) {
+    still_removed <- previous_removed
+    if("content_key" %in% names(reintroduced_files)) {
+      still_removed <- still_removed %>%
+        anti_join(reintroduced_files, by = "content_key")
+    }
+    still_removed <- still_removed %>%
+      mutate(
+        status = "removed",
+        first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter else current_metadata$summary$snapshot_id
+      ) %>%
+      select(any_of(names(newly_removed)))
+  }
+  
+  removed_files <- bind_rows(newly_removed, still_removed)
   
   summary_info <- list(
-    new_count = nrow(potential_new),
-    modified_count = nrow(potential_modified),
+    new_count = nrow(new_files),
+    modified_count = nrow(modified_files),
     renamed_count = nrow(renamed_files),
+    reintroduced_count = nrow(reintroduced_files),
     unchanged_count = nrow(unchanged_files),
     removed_count = nrow(removed_files)
   )
@@ -229,13 +331,15 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL) {
   message("  New files: ", summary_info$new_count)
   message("  Modified files: ", summary_info$modified_count)
   message("  Renamed files: ", summary_info$renamed_count)
+  message("  Reintroduced files: ", summary_info$reintroduced_count)
   message("  Unchanged files: ", summary_info$unchanged_count)
   message("  Removed files: ", summary_info$removed_count)
   
   return(list(
-    new_files = potential_new,
-    modified_files = potential_modified,
+    new_files = new_files,
+    modified_files = modified_files,
     renamed_files = renamed_files,
+    reintroduced_files = reintroduced_files,
     unchanged_files = unchanged_files,
     removed_files = removed_files,
     summary = summary_info
@@ -280,7 +384,7 @@ create_incremental_archive <- function(archive_config) {
   
   dir_create(current_staging_path)
   
-  # Create current snapshot metadata
+  # Create current snapshot metadata (active files only)
   current_metadata <- create_snapshot_metadata(
     source_path = source_path,
     snapshot_id = snapshot_id,
@@ -289,11 +393,12 @@ create_incremental_archive <- function(archive_config) {
     exclude_patterns = exclude_patterns
   )
   
-  # Find most recent previous snapshot
+  # Find most recent previous snapshot (excluding current snapshot)
   previous_metadata <- NULL
   if(dir_exists(archive_root)) {
     existing_snapshots <- dir_ls(archive_root, type = "directory") %>%
       path_file() %>%
+      setdiff(snapshot_id) %>%  # Exclude current snapshot
       sort(decreasing = TRUE)
     
     if(length(existing_snapshots) > 0) {
@@ -301,6 +406,8 @@ create_incremental_archive <- function(archive_config) {
       previous_metadata_file <- path(archive_root, previous_snapshot_id, paste0(previous_snapshot_id, "_metadata.json"))
       previous_metadata <- load_snapshot_metadata(previous_metadata_file)
       message("Comparing against previous snapshot: ", previous_snapshot_id)
+    } else {
+      message("No previous snapshots found - all files will be marked as NEW")
     }
   }
   
@@ -412,17 +519,69 @@ create_incremental_archive <- function(archive_config) {
   write_json(archive_report, path(current_staging_path, paste0(snapshot_id, "_archive_report.json")), 
              pretty = TRUE, auto_unbox = TRUE)
   
-  # Create summary CSV
+  # Create enhanced metadata that includes removed files for persistence
   if(exists("comparison_result")) {
-    summary_df <- bind_rows(
-      comparison_result$new_files %>% mutate(status = "NEW"),
-      comparison_result$modified_files %>% mutate(status = "MODIFIED"),
-      comparison_result$unchanged_files %>% mutate(status = "UNCHANGED")
-    ) %>%
-      select(status, category_1, category_2, relative_path, file_name, size, modified_time) %>%
-      arrange(status, category_1, category_2, relative_path)
+    # Safely combine active files with removed files for complete metadata
+    file_components <- list()
     
-    write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
+    if(nrow(comparison_result$new_files) > 0) {
+      file_components$new <- comparison_result$new_files %>% mutate(status = NA_character_)
+    }
+    if(nrow(comparison_result$modified_files) > 0) {
+      file_components$modified <- comparison_result$modified_files %>% mutate(status = NA_character_)
+    }
+    if(nrow(comparison_result$renamed_files) > 0) {
+      file_components$renamed <- comparison_result$renamed_files %>% mutate(status = NA_character_)
+    }
+    if(nrow(comparison_result$reintroduced_files) > 0) {
+      file_components$reintroduced <- comparison_result$reintroduced_files %>% mutate(status = NA_character_)
+    }
+    if(nrow(comparison_result$unchanged_files) > 0) {
+      file_components$unchanged <- comparison_result$unchanged_files %>% mutate(status = NA_character_)
+    }
+    if(nrow(comparison_result$removed_files) > 0) {
+      file_components$removed <- comparison_result$removed_files  # already has status field
+    }
+    
+    # Combine all non-empty components
+    if(length(file_components) > 0) {
+      all_files_with_status <- bind_rows(file_components)
+    } else {
+      all_files_with_status <- current_metadata$files %>% mutate(status = NA_character_)
+    }
+    
+    # Update current metadata to include all files (active + removed)
+    current_metadata$files <- all_files_with_status
+    
+    # Re-save the enhanced metadata
+    write_json(current_metadata, current_metadata_file, pretty = TRUE, auto_unbox = TRUE)
+    
+    # Create summary CSV (active files only for display)
+    summary_components <- list()
+    
+    if(nrow(comparison_result$new_files) > 0) {
+      summary_components$new <- comparison_result$new_files %>% mutate(status = "NEW")
+    }
+    if(nrow(comparison_result$modified_files) > 0) {
+      summary_components$modified <- comparison_result$modified_files %>% mutate(status = "MODIFIED")
+    }
+    if(nrow(comparison_result$renamed_files) > 0) {
+      summary_components$renamed <- comparison_result$renamed_files %>% mutate(status = "RENAMED")
+    }
+    if(nrow(comparison_result$reintroduced_files) > 0) {
+      summary_components$reintroduced <- comparison_result$reintroduced_files %>% mutate(status = "REINTRODUCED")
+    }
+    if(nrow(comparison_result$unchanged_files) > 0) {
+      summary_components$unchanged <- comparison_result$unchanged_files %>% mutate(status = "UNCHANGED")
+    }
+    
+    if(length(summary_components) > 0) {
+      summary_df <- bind_rows(summary_components) %>%
+        select(status, category_1, category_2, relative_path, file_name, size, modified_time) %>%
+        arrange(status, category_1, category_2, relative_path)
+      
+      write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
+    }
   }
   
   message("=== Archive Process Complete ===")
