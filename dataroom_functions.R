@@ -176,17 +176,178 @@ mark_duplicates <- function(files_df) {
   return(files_with_dup_info)
 }
 
+#' Calculate Fuzzy Match Score for Potential Renamed-and-Modified Files
+#'
+#' Compares two files based on characteristics other than content to determine
+#' if they might be the same file that was renamed and modified.
+#'
+#' @param new_file Single row tibble with file metadata
+#' @param removed_file Single row tibble with file metadata
+#' @return Numeric score (0-100) indicating match likelihood
+#' @export
+calculate_fuzzy_match_score <- function(new_file, removed_file) {
+  score <- 0
+  max_score <- 100
+  
+  # 1. File extension match (25 points)
+  new_ext <- tolower(path_ext(new_file$file_name))
+  old_ext <- tolower(path_ext(removed_file$file_name))
+  if(new_ext == old_ext && nchar(new_ext) > 0) {
+    score <- score + 25
+  }
+  
+  # 2. File name similarity using string distance (30 points)
+  new_name <- tolower(path_file(new_file$file_name))
+  old_name <- tolower(path_file(removed_file$file_name))
+  
+  # Calculate Levenshtein distance normalized by max length
+  max_len <- max(nchar(new_name), nchar(old_name))
+  if(max_len > 0) {
+    distance <- adist(new_name, old_name)[1,1]
+    similarity <- 1 - (distance / max_len)
+    score <- score + (similarity * 30)
+  }
+  
+  # 3. Size similarity (20 points) - allow up to 20% difference
+  if(!is.na(new_file$size) && !is.na(removed_file$size) && 
+     new_file$size > 0 && removed_file$size > 0) {
+    size_ratio <- min(new_file$size, removed_file$size) / max(new_file$size, removed_file$size)
+    if(size_ratio >= 0.8) {  # Within 20% of each other
+      score <- score + (size_ratio * 20)
+    }
+  }
+  
+  # 4. Directory similarity (15 points)
+  new_dir <- tolower(path_dir(new_file$relative_path))
+  old_dir <- tolower(path_dir(removed_file$relative_path))
+  
+  # Check if directories share common path components
+  new_parts <- str_split(new_dir, "/")[[1]]
+  old_parts <- str_split(old_dir, "/")[[1]]
+  common_parts <- length(intersect(new_parts, old_parts))
+  max_parts <- max(length(new_parts), length(old_parts))
+  if(max_parts > 0) {
+    dir_similarity <- common_parts / max_parts
+    score <- score + (dir_similarity * 15)
+  }
+  
+  # 5. Modified time proximity (10 points) - files modified within 30 days
+  if(!is.na(new_file$modified_time) && !is.na(removed_file$modified_time)) {
+    tryCatch({
+      new_time <- as.POSIXct(new_file$modified_time)
+      old_time <- as.POSIXct(removed_file$modified_time)
+      days_diff <- abs(as.numeric(difftime(new_time, old_time, units = "days")))
+      if(days_diff <= 30) {
+        time_score <- 10 * (1 - (days_diff / 30))
+        score <- score + time_score
+      }
+    }, error = function(e) {
+      # Ignore date parsing errors
+    })
+  }
+  
+  return(round(score, 2))
+}
+
+#' Identify Potential Renamed-and-Modified File Pairs
+#'
+#' Finds pairs of NEW and REMOVED files that may actually be the same file
+#' that was both renamed and modified. Uses fuzzy matching based on file
+#' characteristics.
+#'
+#' @param new_files Tibble of new files
+#' @param removed_files Tibble of removed files
+#' @param threshold Minimum match score (0-100) to flag as potential match (default 60)
+#' @return List with new_files and removed_files tibbles with added suggestion columns
+#' @export
+identify_potential_rename_modify <- function(new_files, removed_files, threshold = 60) {
+  
+  # Initialize suggestion columns
+  new_files <- new_files %>%
+    mutate(
+      potential_rename_modify = FALSE,
+      suggested_original_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
+  
+  removed_files <- removed_files %>%
+    mutate(
+      potential_rename_modify = FALSE,
+      suggested_new_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
+  
+  # If either set is empty, return with empty suggestions
+  if(nrow(new_files) == 0 || nrow(removed_files) == 0) {
+    return(list(new_files = new_files, removed_files = removed_files))
+  }
+  
+  # Calculate scores for all pairs (don't filter by threshold yet)
+  matches <- expand_grid(
+    new_idx = 1:nrow(new_files),
+    removed_idx = 1:nrow(removed_files)
+  ) %>%
+    rowwise() %>%
+    mutate(
+      score = calculate_fuzzy_match_score(
+        new_files[new_idx, ],
+        removed_files[removed_idx, ]
+      )
+    ) %>%
+    ungroup() %>%
+    arrange(desc(score))
+  
+  # For each new file, find best match. Always record the best candidate
+  # and its score; only set potential_rename_modify to TRUE when the score >= threshold.
+  for(i in 1:nrow(new_files)) {
+    best_match <- matches %>%
+      filter(new_idx == i) %>%
+      slice_max(score, n = 1, with_ties = FALSE)
+
+    if(nrow(best_match) > 0) {
+      candidate_removed <- removed_files$relative_path[best_match$removed_idx]
+      candidate_score <- best_match$score
+      new_files$suggested_original_file[i] <- candidate_removed
+      new_files$match_confidence_score[i] <- candidate_score
+      if(candidate_score >= threshold) {
+        new_files$potential_rename_modify[i] <- TRUE
+      }
+    }
+  }
+
+  # For each removed file, find best match. Record best candidate and score.
+  for(i in 1:nrow(removed_files)) {
+    best_match <- matches %>%
+      filter(removed_idx == i) %>%
+      slice_max(score, n = 1, with_ties = FALSE)
+
+    if(nrow(best_match) > 0) {
+      candidate_new <- new_files$relative_path[best_match$new_idx]
+      candidate_score <- best_match$score
+      removed_files$suggested_new_file[i] <- candidate_new
+      removed_files$match_confidence_score[i] <- candidate_score
+      if(candidate_score >= threshold) {
+        removed_files$potential_rename_modify[i] <- TRUE
+      }
+    }
+  }
+  
+  return(list(new_files = new_files, removed_files = removed_files))
+}
+
 #' Compare Snapshots and Identify Changes
 #'
 #' Compares current source against previous snapshot metadata to identify
-#' new, modified, and unchanged files. Also detects duplicate content.
+#' new, modified, and unchanged files. Also detects duplicate content and
+#' potential renamed-and-modified file pairs.
 #'
 #' @param current_metadata Current snapshot metadata
 #' @param previous_metadata Previous snapshot metadata (can be NULL)
 #' @param verbose Logical, whether to print progress messages (default TRUE)
+#' @param fuzzy_match_threshold Minimum score (0-100) for flagging potential rename-modify pairs (default 80)
 #' @return List containing categorized file information
 #' @export
-compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbose = TRUE) {
+compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbose = TRUE, fuzzy_match_threshold = 80) {
   
   if(is.null(previous_metadata) || is.null(previous_metadata$files) || nrow(previous_metadata$files) == 0) {
     if(verbose) message("No previous snapshot found - all files will be treated as new")
@@ -214,7 +375,17 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
     ))
   }
   
-  current_files <- current_metadata$files
+  # `current_metadata$files` may be an enhanced metadata blob that includes
+  # previously removed files (status == "removed"). For comparisons we only
+  # want the active files (those without `status == 'removed'`). Handle both
+  # raw snapshot metadata and enhanced metadata here.
+  current_files_raw <- current_metadata$files
+  if(!is.null(current_files_raw) && "status" %in% names(current_files_raw)) {
+    current_files <- current_files_raw %>%
+      filter(is.na(status) | status != "removed")
+  } else {
+    current_files <- current_files_raw
+  }
   
   # Handle previous files: include both active and previously removed files
   # Previous files might have status field indicating if they were removed in earlier quarters
@@ -380,6 +551,15 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
     sum(unchanged_files$is_duplicate, na.rm = TRUE)
   )
   
+  # Identify potential renamed-and-modified file pairs using fuzzy matching
+  # This helps flag cases where a file was both renamed AND modified (so MD5 doesn't match)
+  fuzzy_results <- identify_potential_rename_modify(new_files, removed_files, fuzzy_match_threshold)
+  new_files <- fuzzy_results$new_files
+  removed_files <- fuzzy_results$removed_files
+  
+  # Count potential rename-modify pairs for reporting
+  potential_rename_modify_count <- sum(new_files$potential_rename_modify, na.rm = TRUE)
+  
   summary_info <- list(
     new_count = nrow(new_files),
     modified_count = nrow(modified_files),
@@ -387,7 +567,8 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
     reintroduced_count = nrow(reintroduced_files),
     unchanged_count = nrow(unchanged_files),
     removed_count = nrow(removed_files),
-    duplicate_count = total_duplicates
+    duplicate_count = total_duplicates,
+    potential_rename_modify_count = potential_rename_modify_count
   )
   
   if(verbose) {
@@ -400,6 +581,9 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
     message("  Removed files: ", summary_info$removed_count)
     if(total_duplicates > 0) {
       message("  Duplicate files detected: ", total_duplicates)
+    }
+    if(potential_rename_modify_count > 0) {
+      message("  ⚠ Potential rename-and-modify pairs flagged: ", potential_rename_modify_count, " (requires review)")
     }
   }
   
@@ -646,10 +830,80 @@ create_incremental_archive <- function(archive_config) {
     if(length(summary_components) > 0) {
       summary_df <- bind_rows(summary_components) %>%
         select(status, category_1, category_2, relative_path, file_name, size, modified_time, 
-               is_duplicate, duplicate_of) %>%
+               is_duplicate, duplicate_of, 
+               potential_rename_modify, suggested_original_file, match_confidence_score) %>%
         arrange(status, category_1, category_2, relative_path)
       
       write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
+    }
+    
+    # Create separate CSV for removed files (including fuzzy match suggestions)
+    if(nrow(comparison_result$removed_files) > 0) {
+      removed_df <- comparison_result$removed_files %>%
+        select(status, category_1, category_2, relative_path, file_name, size, modified_time,
+               first_removed_quarter,
+               potential_rename_modify, suggested_new_file, match_confidence_score) %>%
+        arrange(category_1, category_2, relative_path)
+      
+      write_csv(removed_df, path(current_staging_path, paste0(snapshot_id, "_removed_files.csv")))
+    }
+    
+    # Create fuzzy match suggestion CSV for human review
+    # This shows potential renamed-and-modified file pairs sorted by confidence score
+    # Each row represents one potential pair with both the removed and new file details
+    
+    if(nrow(comparison_result$removed_files) > 0 && nrow(comparison_result$new_files) > 0) {
+      # Get removed files with their suggested new file matches
+      removed_with_matches <- comparison_result$removed_files %>%
+        filter(!is.na(match_confidence_score)) %>%
+        select(
+          removed_file = relative_path,
+          removed_file_name = file_name,
+          removed_size = size,
+          removed_modified_time = modified_time,
+          removed_category_1 = category_1,
+          removed_category_2 = category_2,
+          suggested_new_file,
+          match_confidence_score,
+          flagged_as_potential = potential_rename_modify
+        )
+      
+      # Join with new files to get their details
+      new_file_details <- comparison_result$new_files %>%
+        select(
+          new_file_path = relative_path,
+          new_file_name = file_name,
+          new_size = size,
+          new_modified_time = modified_time,
+          new_category_1 = category_1,
+          new_category_2 = category_2
+        )
+      
+      # Create final pairs CSV
+      fuzzy_pairs <- removed_with_matches %>%
+        left_join(new_file_details, by = c("suggested_new_file" = "new_file_path")) %>%
+        select(
+          match_confidence_score,
+          flagged_as_potential,
+          removed_file,
+          removed_file_name,
+          removed_size,
+          removed_modified_time,
+          removed_category_1,
+          removed_category_2,
+          suggested_new_file,
+          new_file_name,
+          new_size,
+          new_modified_time,
+          new_category_1,
+          new_category_2
+        ) %>%
+        arrange(desc(match_confidence_score))
+      
+      if(nrow(fuzzy_pairs) > 0) {
+        write_csv(fuzzy_pairs, 
+                  path(current_staging_path, paste0(snapshot_id, "_fuzzy_match_pairs.csv")))
+      }
     }
   }
   
