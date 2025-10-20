@@ -356,6 +356,14 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
     new_files_with_dups <- mark_duplicates(current_metadata$files)
     dup_count <- sum(new_files_with_dups$is_duplicate, na.rm = TRUE)
     
+    # Add fuzzy matching columns (even though there's nothing to match against)
+    new_files_with_dups <- new_files_with_dups %>%
+      mutate(
+        potential_rename_modify = NA,
+        suggested_original_file = NA_character_,
+        match_confidence_score = NA_real_
+      )
+    
     return(list(
       new_files = new_files_with_dups,
       modified_files = tibble(),
@@ -472,7 +480,7 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
             inner_join(previous_removed, by = "content_key", suffix = c("", "_removed")) %>%
             mutate(
               change_type = "reintroduced",
-              first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter_removed else NA_character_,
+              first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter else NA_character_,
               original_path = relative_path_removed
             ) %>%
             select(all_of(c(names(current_files)[names(current_files) != "content_key"], 
@@ -541,6 +549,33 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
   renamed_files <- mark_duplicates(renamed_files)
   reintroduced_files <- mark_duplicates(reintroduced_files)
   unchanged_files <- mark_duplicates(unchanged_files)
+  
+  # Add fuzzy matching columns to file types that don't get fuzzy matched
+  # (so all file types have consistent columns for binding)
+  modified_files <- modified_files %>%
+    mutate(
+      potential_rename_modify = NA,
+      suggested_original_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
+  renamed_files <- renamed_files %>%
+    mutate(
+      potential_rename_modify = NA,
+      suggested_original_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
+  reintroduced_files <- reintroduced_files %>%
+    mutate(
+      potential_rename_modify = NA,
+      suggested_original_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
+  unchanged_files <- unchanged_files %>%
+    mutate(
+      potential_rename_modify = NA,
+      suggested_original_file = NA_character_,
+      match_confidence_score = NA_real_
+    )
   
   # Count duplicates across all active files
   total_duplicates <- sum(
@@ -830,8 +865,8 @@ create_incremental_archive <- function(archive_config) {
     if(length(summary_components) > 0) {
       summary_df <- bind_rows(summary_components) %>%
         select(status, category_1, category_2, relative_path, file_name, size, modified_time, 
-               is_duplicate, duplicate_of, 
-               potential_rename_modify, suggested_original_file, match_confidence_score) %>%
+               any_of(c("is_duplicate", "duplicate_of", 
+                       "potential_rename_modify", "suggested_original_file", "match_confidence_score"))) %>%
         arrange(status, category_1, category_2, relative_path)
       
       write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))

@@ -14,7 +14,7 @@ params:
   # Global Configuration
   global_snapshot_id: "2025Q3"
   staging_root: "./temp_staging"  # Temporary staging directory (excluded from git)
-  archive_root: "/mnt/z/Shared/Jaffa Main/Insurance/Reserving and Valuations/Data Room Prep/20250630/Huggins Dataroom/Underwriting/Content"
+  archive_root: "./temp_staging" # Temporary archive root (excluded from git)
   
   # Archive Configurations (can be overridden)
   archive_configs: !r |
@@ -123,7 +123,7 @@ full_configs <- map(params$archive_configs, ~ {
   config <- .x
   config$snapshot_id <- params$global_snapshot_id
   config$staging_root <- params$staging_root
-  config$archive_root <- path(params$archive_root, config$archive_name)
+  config$archive_root <- params$archive_root  # Don't append archive_name - it's the root for all snapshots
   config
 })
 
@@ -333,6 +333,177 @@ for(archive_name in names(archive_results$individual_results)) {
   cat("\n\n---\n\n")
 }
 ```
+
+---
+
+# Fuzzy Match Suggestions (Rename + Modify Detection)
+
+The system uses intelligent fuzzy matching to identify files that may have been both **renamed AND modified** between snapshots. Since modified files have different MD5 hashes, they would normally appear as separate "REMOVED" and "NEW" files. The fuzzy matcher compares file characteristics (extension, name similarity, size, directory, timestamp) to suggest potential pairs for human review.
+
+```{r fuzzy-match-summary, results='asis'}
+# Collect fuzzy match data from all archives
+fuzzy_summary <- map_dfr(archive_results$individual_results, ~ {
+  result <- .x
+  fuzzy_pairs_file <- path(result$staging_path, paste0(result$snapshot_id, "_fuzzy_match_pairs.csv"))
+  
+  if(file_exists(fuzzy_pairs_file)) {
+    pairs <- read_csv(fuzzy_pairs_file, show_col_types = FALSE)
+    tibble(
+      Archive = result$archive_config$archive_name,
+      Total_Pairs = nrow(pairs),
+      Flagged_Pairs = sum(pairs$flagged_as_potential, na.rm = TRUE),
+      Top_Score = max(pairs$match_confidence_score, na.rm = TRUE)
+    )
+  } else {
+    tibble(
+      Archive = result$archive_config$archive_name,
+      Total_Pairs = 0,
+      Flagged_Pairs = 0,
+      Top_Score = NA_real_
+    )
+  }
+})
+
+if(nrow(fuzzy_summary) > 0 && sum(fuzzy_summary$Total_Pairs) > 0) {
+  cat("## Summary\n\n")
+  cat("Fuzzy matching analyzes removed and new files to identify potential rename-and-modify pairs:\n\n")
+  
+  kable(fuzzy_summary, 
+        caption = "Fuzzy Match Summary by Archive",
+        col.names = c("Archive", "Total Pairs Analyzed", "Flagged for Review (≥80)", "Top Score")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+  
+  cat("\n\n**Scoring Algorithm:**\n\n")
+  cat("- **Extension Match**: 25 points (same file type)\n")
+  cat("- **Name Similarity**: 30 points (Levenshtein distance)\n")
+  cat("- **Size Similarity**: 20 points (within 20% of each other)\n")
+  cat("- **Directory Similarity**: 15 points (common path components)\n")
+  cat("- **Time Proximity**: 10 points (modified within 30 days)\n")
+  cat("- **Threshold**: 80 points (scores ≥80 are flagged for review)\n\n")
+  
+} else {
+  cat("No fuzzy matching data available for this archive period.\n\n")
+}
+```
+
+```{r fuzzy-flagged-pairs, results='asis'}
+# Display flagged pairs for each archive
+for(archive_name in names(archive_results$individual_results)) {
+  result <- archive_results$individual_results[[archive_name]]
+  fuzzy_pairs_file <- path(result$staging_path, paste0(result$snapshot_id, "_fuzzy_match_pairs.csv"))
+  
+  if(file_exists(fuzzy_pairs_file)) {
+    pairs <- read_csv(fuzzy_pairs_file, show_col_types = FALSE)
+    flagged_pairs <- pairs %>% filter(flagged_as_potential)
+    
+    if(nrow(flagged_pairs) > 0) {
+      cat("## ", str_to_title(archive_name), " - Flagged Pairs (Score ≥ 80)\n\n")
+      cat("⚠️ **", nrow(flagged_pairs), " high-confidence pairs require human review:**\n\n")
+      
+      # Create detailed table
+      flagged_table <- flagged_pairs %>%
+        mutate(
+          removed_size_mb = round(removed_size / (1024^2), 2),
+          new_size_mb = round(new_size / (1024^2), 2),
+          size_diff_pct = round(abs(new_size - removed_size) / removed_size * 100, 1)
+        ) %>%
+        select(
+          Score = match_confidence_score,
+          `Removed File` = removed_file_name,
+          `Removed Size (MB)` = removed_size_mb,
+          `Removed Category` = removed_category_1,
+          `New File` = new_file_name,
+          `New Size (MB)` = new_size_mb,
+          `New Category` = new_category_1,
+          `Size Δ %` = size_diff_pct
+        ) %>%
+        arrange(desc(Score))
+      
+      print(datatable(
+        flagged_table,
+        caption = paste("High-Confidence Rename+Modify Pairs -", str_to_title(archive_name)),
+        options = list(pageLength = 20, autoWidth = TRUE, scrollX = TRUE),
+        class = "display compact"
+      ) %>%
+        formatStyle(
+          "Score",
+          background = styleColorBar(range(flagged_table$Score), "#28a745"),
+          backgroundSize = "100% 90%",
+          backgroundRepeat = "no-repeat",
+          backgroundPosition = "center"
+        ) %>%
+        formatRound(c("Score"), 1))
+      
+      cat("\n\n**Review Guidance:**\n\n")
+      cat("1. **Verify each pair** by examining file contents and metadata\n")
+      cat("2. **If confirmed as same file**: Mark as RENAMED+MODIFIED (not NEW+REMOVED)\n")
+      cat("3. **If different files**: Keep as separate NEW and REMOVED entries\n")
+      cat("4. **Check categories**: Files should typically stay in same/related categories\n\n")
+      
+      cat("---\n\n")
+    }
+  }
+}
+```
+
+```{r fuzzy-all-pairs, results='asis'}
+# Show all pairs (including below threshold) for manual review
+for(archive_name in names(archive_results$individual_results)) {
+  result <- archive_results$individual_results[[archive_name]]
+  fuzzy_pairs_file <- path(result$staging_path, paste0(result$snapshot_id, "_fuzzy_match_pairs.csv"))
+  
+  if(file_exists(fuzzy_pairs_file)) {
+    pairs <- read_csv(fuzzy_pairs_file, show_col_types = FALSE)
+    
+    if(nrow(pairs) > 0) {
+      cat("## ", str_to_title(archive_name), " - All Suggested Pairs\n\n")
+      cat("📊 **Complete fuzzy match analysis** (", nrow(pairs), " pairs analyzed):\n\n")
+      cat("*Pairs below threshold (80) are shown for reference but are less likely to be matches.*\n\n")
+      
+      # Create comprehensive table
+      all_pairs_table <- pairs %>%
+        mutate(
+          removed_size_mb = round(removed_size / (1024^2), 2),
+          new_size_mb = round(new_size / (1024^2), 2)
+        ) %>%
+        select(
+          Score = match_confidence_score,
+          Flagged = flagged_as_potential,
+          `Removed File` = removed_file_name,
+          `Removed Category` = removed_category_1,
+          `Removed Modified` = removed_modified_time,
+          `New File` = new_file_name,
+          `New Category` = new_category_1,
+          `New Modified` = new_modified_time
+        ) %>%
+        arrange(desc(Score))
+      
+      print(datatable(
+        all_pairs_table,
+        caption = paste("All Fuzzy Match Pairs -", str_to_title(archive_name)),
+        options = list(
+          pageLength = 10, 
+          autoWidth = TRUE, 
+          scrollX = TRUE,
+          order = list(list(0, 'desc'))  # Sort by score descending
+        ),
+        class = "display compact",
+        filter = 'top'  # Add column filters
+      ) %>%
+        formatStyle(
+          "Flagged",
+          backgroundColor = styleEqual(c(TRUE, FALSE), c("#fff3cd", "#ffffff"))
+        ) %>%
+        formatRound(c("Score"), 1))
+      
+      cat("\n\n**CSV Export:** Full details available in `", basename(fuzzy_pairs_file), "`\n\n")
+      cat("---\n\n")
+    }
+  }
+}
+```
+
+---
 
 # File Locations and Next Steps
 
