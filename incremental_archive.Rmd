@@ -319,9 +319,9 @@ for(archive_name in names(archive_results$individual_results)) {
           size_mb = round(size / (1024^2), 3),
           modified_date = as.Date(ymd_hms(modified_time))
         ) %>%
-        select(Status = status, Category1 = category_1, Category2 = category_2, 
+        select(Status = status, Segment = segment, Deal = deal, 
                File = file_name, `Size (MB)` = size_mb, Modified = modified_date) %>%
-        arrange(Status, Category1, Category2)
+        arrange(Status, Segment, Deal)
       
       # Print the table with proper markdown formatting
       print(kable(summary_table, caption = paste("File Summary for", str_to_title(archive_name))) %>%
@@ -411,10 +411,10 @@ for(archive_name in names(archive_results$individual_results)) {
           Score = match_confidence_score,
           `Removed File` = removed_file_name,
           `Removed Size (MB)` = removed_size_mb,
-          `Removed Category` = removed_category_1,
+          `Removed Category` = removed_segment,
           `New File` = new_file_name,
           `New Size (MB)` = new_size_mb,
-          `New Category` = new_category_1,
+          `New Category` = new_segment,
           `Size Δ %` = size_diff_pct
         ) %>%
         arrange(desc(Score))
@@ -470,10 +470,10 @@ for(archive_name in names(archive_results$individual_results)) {
           Score = match_confidence_score,
           Flagged = flagged_as_potential,
           `Removed File` = removed_file_name,
-          `Removed Category` = removed_category_1,
+          `Removed Category` = removed_segment,
           `Removed Modified` = removed_modified_time,
           `New File` = new_file_name,
-          `New Category` = new_category_1,
+          `New Category` = new_segment,
           `New Modified` = new_modified_time
         ) %>%
         arrange(desc(Score))

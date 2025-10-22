@@ -65,9 +65,12 @@ create_snapshot_metadata <- function(
           size = as.numeric(file_info$size),
           modified_time = as.character(file_info$modification_time),
           md5_hash = digest(file = file_path, algo = "md5"),
-          category_1 = if(!is.na(classification[2])) classification[2] else "uncategorized",
-          category_2 = if(!is.na(classification[3])) classification[3] else "uncategorized",
-          directory = path_dir(rel_path)
+          segment = if(!is.na(classification[2])) classification[2] else "uncategorized",
+          deal = if(!is.na(classification[3])) classification[3] else "uncategorized",
+          directory = path_dir(rel_path),
+          current_archive_date = snapshot_id,
+          first_seen_quarter = snapshot_id,
+          last_archived_quarter = snapshot_id  # New files are archived in current quarter
         )
       }, error = function(e) {
         warning("Error processing file: ", file_path, " - ", e$message)
@@ -90,8 +93,8 @@ create_snapshot_metadata <- function(
     total_files = nrow(file_metadata),
     total_size = sum(file_metadata$size, na.rm = TRUE),
     categories = file_metadata %>% 
-      count(category_1, category_2, name = "file_count") %>%
-      arrange(category_1, category_2),
+      count(segment, deal, name = "file_count") %>%
+      arrange(segment, deal),
     file_types = file_metadata %>%
       mutate(extension = path_ext(file_name)) %>%
       count(extension, name = "count") %>%
@@ -426,6 +429,10 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
   if(all(c("relative_path", "content_key") %in% names(previous_active))) {
     unchanged_files <- current_files %>%
       inner_join(previous_active, by = c("relative_path", "content_key"), suffix = c("", "_prev")) %>%
+      mutate(
+        first_seen_quarter = if("first_seen_quarter" %in% names(previous_active)) first_seen_quarter_prev else first_seen_quarter,
+        last_archived_quarter = if("last_archived_quarter" %in% names(previous_active)) last_archived_quarter_prev else last_archived_quarter
+      ) %>%
       select(all_of(names(current_files)[names(current_files) != "content_key"]))
   }
   
@@ -459,7 +466,9 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
         mutate(
           change_type = "renamed",
           previous_path = relative_path_prev,
-          match_confidence = "exact_content"
+          match_confidence = "exact_content",
+          first_seen_quarter = if("first_seen_quarter" %in% names(files_at_old_paths)) first_seen_quarter_prev else first_seen_quarter,
+          last_archived_quarter = last_archived_quarter  # Renamed files are archived in current quarter (already set correctly)
         )
     }
 
@@ -477,11 +486,15 @@ compare_snapshots <- function(current_metadata, previous_metadata = NULL, verbos
         reintroduced_matches <- tibble()
         if("content_key" %in% names(previous_removed) && "content_key" %in% names(remaining_new_paths)) {
           reintroduced_matches <- remaining_new_paths %>%
-            inner_join(previous_removed, by = "content_key", suffix = c("", "_removed")) %>%
+            inner_join(previous_removed, by = "content_key", suffix = c("", "_removed"), relationship = "many-to-many") %>%
             mutate(
               change_type = "reintroduced",
-              first_removed_quarter = if("first_removed_quarter" %in% names(previous_removed)) first_removed_quarter else NA_character_,
-              original_path = relative_path_removed
+              first_removed_quarter = if(any(str_detect(names(.), "_removed$"))) {
+                if("first_removed_quarter_removed" %in% names(.)) first_removed_quarter_removed else NA_character_
+              } else NA_character_,
+              original_path = relative_path_removed,
+              first_seen_quarter = if("first_seen_quarter_removed" %in% names(.)) first_seen_quarter_removed else first_seen_quarter,
+              last_archived_quarter = last_archived_quarter  # Reintroduced files are archived in current quarter (already set correctly)
             ) %>%
             select(all_of(c(names(current_files)[names(current_files) != "content_key"], 
                            "change_type", "first_removed_quarter", "original_path")))
@@ -717,7 +730,8 @@ create_incremental_archive <- function(archive_config) {
     new_copy_ops <- comparison_result$new_files %>%
       mutate(
         source_file = full_path,
-        dest_dir = path(new_files_dir, category_1, category_2),
+        # Preserve full directory structure
+        dest_dir = path(new_files_dir, directory),
         dest_file = path(dest_dir, file_name),
         operation_type = "new"
       )
@@ -730,11 +744,40 @@ create_incremental_archive <- function(archive_config) {
     modified_copy_ops <- comparison_result$modified_files %>%
       mutate(
         source_file = full_path,
-        dest_dir = path(modified_files_dir, category_1, category_2),
+        # Preserve full directory structure
+        dest_dir = path(modified_files_dir, directory),
         dest_file = path(dest_dir, file_name),
         operation_type = "modified"
       )
     copy_operations <- c(copy_operations, list(modified_copy_ops))
+  }
+  
+  # Process renamed files - copy to MODIFIED folder (they're modifications at the folder level)
+  if(nrow(comparison_result$renamed_files) > 0) {
+    message("Copying ", nrow(comparison_result$renamed_files), " renamed files to MODIFIED...")
+    renamed_copy_ops <- comparison_result$renamed_files %>%
+      mutate(
+        source_file = full_path,
+        # Preserve full directory structure
+        dest_dir = path(modified_files_dir, directory),
+        dest_file = path(dest_dir, file_name),
+        operation_type = "renamed"
+      )
+    copy_operations <- c(copy_operations, list(renamed_copy_ops))
+  }
+  
+  # Process reintroduced files - copy to NEW folder (they're new in this archive)
+  if(nrow(comparison_result$reintroduced_files) > 0) {
+    message("Copying ", nrow(comparison_result$reintroduced_files), " reintroduced files to NEW...")
+    reintroduced_copy_ops <- comparison_result$reintroduced_files %>%
+      mutate(
+        source_file = full_path,
+        # Preserve full directory structure
+        dest_dir = path(new_files_dir, directory),
+        dest_file = path(dest_dir, file_name),
+        operation_type = "reintroduced"
+      )
+    copy_operations <- c(copy_operations, list(reintroduced_copy_ops))
   }
   
   # Create reference links for unchanged files
@@ -743,11 +786,11 @@ create_incremental_archive <- function(archive_config) {
     unchanged_refs <- comparison_result$unchanged_files %>%
       mutate(
         reference_path = if(!is.null(previous_metadata)) {
-          path(archive_root, previous_metadata$summary$snapshot_id, "archive", category_1, category_2, file_name)
+          path(archive_root, previous_metadata$summary$snapshot_id, "archive", segment, deal, file_name)
         } else {
           NA_character_
         },
-        dest_dir = path(unchanged_files_dir, category_1, category_2),
+        dest_dir = path(unchanged_files_dir, segment, deal),
         operation_type = "reference"
       )
     
@@ -768,8 +811,8 @@ create_incremental_archive <- function(archive_config) {
       mutate(
         copy_success = map2_lgl(source_file, dest_file, ~ {
           tryCatch({
-            file_copy(.x, .y, overwrite = TRUE)
-            TRUE
+            # Use base R file.copy with copy.date=TRUE to preserve timestamps
+            file.copy(.x, .y, overwrite = TRUE, copy.date = TRUE, copy.mode = TRUE)
           }, error = function(e) {
             warning("Failed to copy: ", .x, " -> ", .y, " Error: ", e$message)
             FALSE
@@ -864,21 +907,51 @@ create_incremental_archive <- function(archive_config) {
     
     if(length(summary_components) > 0) {
       summary_df <- bind_rows(summary_components) %>%
-        select(status, category_1, category_2, relative_path, file_name, size, modified_time, 
-               any_of(c("is_duplicate", "duplicate_of", 
+        select(status, segment, deal, relative_path, file_name, size, modified_time, 
+               any_of(c("current_archive_date", "first_seen_quarter", "last_archived_quarter",
+                       "is_duplicate", "duplicate_of", 
                        "potential_rename_modify", "suggested_original_file", "match_confidence_score"))) %>%
-        arrange(status, category_1, category_2, relative_path)
+        arrange(status, segment, deal, relative_path)
       
       write_csv(summary_df, path(current_staging_path, paste0(snapshot_id, "_file_summary.csv")))
+      
+      # Create segment/deal summary CSV (aggregated folder-level statistics)
+      segment_deal_summary <- summary_df %>%
+        group_by(segment, deal) %>%
+        summarise(
+          # The most recent quarter where files from this segment/deal were archived
+          # This tells you which quarter's archive folder to look in for the files
+          last_archived_quarter = max(last_archived_quarter, na.rm = TRUE),
+          # Folder classification based on what action occurred this quarter
+          folder_status = case_when(
+            sum(status == "MODIFIED") > 0 | sum(status == "RENAMED") > 0 ~ "MODIFIED",
+            sum(status == "NEW") > 0 | sum(status == "REINTRODUCED") > 0 ~ "NEW",
+            TRUE ~ "UNCHANGED"
+          ),
+          # First seen quarter for this segment/deal is the earliest first_seen_quarter among all its files
+          first_seen_quarter = min(first_seen_quarter, na.rm = TRUE),
+          total_files = n(),
+          new_files = sum(status == "NEW", na.rm = TRUE),
+          modified_files = sum(status == "MODIFIED", na.rm = TRUE),
+          renamed_files = sum(status == "RENAMED", na.rm = TRUE),
+          reintroduced_files = sum(status == "REINTRODUCED", na.rm = TRUE),
+          unchanged_files = sum(status == "UNCHANGED", na.rm = TRUE),
+          # Get a sample folder path for reference
+          sample_folder_path = first(dirname(relative_path)),
+          .groups = "drop"
+        ) %>%
+        arrange(segment, deal)
+      
+      write_csv(segment_deal_summary, path(current_staging_path, paste0(snapshot_id, "_segment_deal_summary.csv")))
     }
     
     # Create separate CSV for removed files (including fuzzy match suggestions)
     if(nrow(comparison_result$removed_files) > 0) {
       removed_df <- comparison_result$removed_files %>%
-        select(status, category_1, category_2, relative_path, file_name, size, modified_time,
+        select(status, segment, deal, relative_path, file_name, size, modified_time,
                first_removed_quarter,
                potential_rename_modify, suggested_new_file, match_confidence_score) %>%
-        arrange(category_1, category_2, relative_path)
+        arrange(segment, deal, relative_path)
       
       write_csv(removed_df, path(current_staging_path, paste0(snapshot_id, "_removed_files.csv")))
     }
@@ -896,8 +969,8 @@ create_incremental_archive <- function(archive_config) {
           removed_file_name = file_name,
           removed_size = size,
           removed_modified_time = modified_time,
-          removed_category_1 = category_1,
-          removed_category_2 = category_2,
+          removed_segment = segment,
+          removed_deal = deal,
           suggested_new_file,
           match_confidence_score,
           flagged_as_potential = potential_rename_modify
@@ -910,8 +983,8 @@ create_incremental_archive <- function(archive_config) {
           new_file_name = file_name,
           new_size = size,
           new_modified_time = modified_time,
-          new_category_1 = category_1,
-          new_category_2 = category_2
+          new_segment = segment,
+          new_deal = deal
         )
       
       # Create final pairs CSV
@@ -924,14 +997,14 @@ create_incremental_archive <- function(archive_config) {
           removed_file_name,
           removed_size,
           removed_modified_time,
-          removed_category_1,
-          removed_category_2,
+          removed_segment,
+          removed_deal,
           suggested_new_file,
           new_file_name,
           new_size,
           new_modified_time,
-          new_category_1,
-          new_category_2
+          new_segment,
+          new_deal
         ) %>%
         arrange(desc(match_confidence_score))
       
