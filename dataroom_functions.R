@@ -698,14 +698,40 @@ create_incremental_archive <- function(archive_config) {
   if(dir_exists(archive_root)) {
     existing_snapshots <- dir_ls(archive_root, type = "directory") %>%
       path_file() %>%
-      setdiff(snapshot_id) %>%  # Exclude current snapshot
-      sort(decreasing = TRUE)
+      setdiff(snapshot_id)  # Exclude current snapshot
     
     if(length(existing_snapshots) > 0) {
-      previous_snapshot_id <- existing_snapshots[1]
-      previous_metadata_file <- path(archive_root, previous_snapshot_id, paste0(previous_snapshot_id, "_metadata.json"))
-      previous_metadata <- load_snapshot_metadata(previous_metadata_file)
-      message("Comparing against previous snapshot: ", previous_snapshot_id)
+      # Sort quarters chronologically by parsing year and quarter
+      sorted_snapshots <- existing_snapshots %>%
+        tibble(quarter_id = .) %>%
+        mutate(
+          year = as.integer(str_extract(quarter_id, "^\\d{4}")),
+          qtr = as.integer(str_extract(quarter_id, "(?<=Q)\\d+$"))
+        ) %>%
+        arrange(desc(year), desc(qtr)) %>%
+        pull(quarter_id)
+      
+      # Find the most recent quarter that comes before the current snapshot
+      current_year <- as.integer(str_extract(snapshot_id, "^\\d{4}"))
+      current_qtr <- as.integer(str_extract(snapshot_id, "(?<=Q)\\d+$"))
+      
+      for(snap in sorted_snapshots) {
+        snap_year <- as.integer(str_extract(snap, "^\\d{4}"))
+        snap_qtr <- as.integer(str_extract(snap, "(?<=Q)\\d+$"))
+        
+        # Check if this snapshot comes before the current one
+        if(snap_year < current_year || (snap_year == current_year && snap_qtr < current_qtr)) {
+          previous_snapshot_id <- snap
+          previous_metadata_file <- path(archive_root, previous_snapshot_id, paste0(previous_snapshot_id, "_metadata.json"))
+          previous_metadata <- load_snapshot_metadata(previous_metadata_file)
+          message("Comparing against previous snapshot: ", previous_snapshot_id)
+          break
+        }
+      }
+      
+      if(is.null(previous_metadata)) {
+        message("No previous snapshots found - all files will be marked as NEW")
+      }
     } else {
       message("No previous snapshots found - all files will be marked as NEW")
     }
