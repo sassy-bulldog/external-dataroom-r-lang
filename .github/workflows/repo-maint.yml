@@ -26,7 +26,7 @@ jobs:
         uses: tiacsys/clean-after-action@v3.0.0
 
       - name: Stale Issues and PRs
-        uses: actions/stale@v9.1.0
+        uses: actions/stale@v10.1.1
         with:
           repo-token: ${{ github.token }}
           # Staling issues and PR's
