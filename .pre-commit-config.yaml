@@ -15,7 +15,7 @@ repos:
   # All available hooks: https://pre-commit.com/hooks.html
   # R specific hooks: https://github.com/lorenzwalthert/precommit
   - repo: https://github.com/lorenzwalthert/precommit
-    rev: v0.4.3.9014
+    rev: v0.4.3.9021
     hooks:
       - id: style-files
         args: [--style_pkg=styler, --style_fun=tidyverse_style, --cache-root=styler-perm]
@@ -123,7 +123,7 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.45.0
+    rev: v0.48.0
     hooks:
       - id: markdownlint-fix
         exclude: ^(CHANGELOG|LICENSE|BLANK_README|.github/).*$
