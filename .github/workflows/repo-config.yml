@@ -47,7 +47,7 @@ jobs:
       # Runs a single command using the runners shell
       - name: Run RepoManager
         if: '!cancelled()' # This is a workaround for a bug in the cancel-in-progress feature
-        uses: actuarysailor/gha-repo-manager@v2.2.3
+        uses: actuarysailor/gha-repo-manager@v2.3.0
         with:
           repo: ${{ matrix.repo }}
           action: 'apply'
