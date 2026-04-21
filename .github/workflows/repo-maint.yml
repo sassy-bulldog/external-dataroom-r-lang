@@ -23,7 +23,7 @@ jobs:
     steps:
       # TODO: Deprecated NodeJS Version
       - name: Clean Agent Workspace
-        uses: tiacsys/clean-after-action@v3.0.0
+        uses: tiacsys/clean-after-action@v4.0.0
 
       - name: Stale Issues and PRs
         uses: actions/stale@v9.1.0
@@ -59,7 +59,7 @@ jobs:
     steps:
       #TODO: Deprecated NodeJS Version
       - name: Clean Agent Workspace
-        uses: tiacsys/clean-after-action@v3.0.0
+        uses: tiacsys/clean-after-action@v4.0.0
 
       - name: Lock Threads
         uses: dessant/lock-threads@v5.0.1

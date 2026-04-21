@@ -38,7 +38,7 @@ jobs:
     steps:
       #TODO: Deprecated NodeJS Version
       - name: Clean Agent Workspace
-        uses: tiacsys/clean-after-action@v3.0.0
+        uses: tiacsys/clean-after-action@v4.0.0
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - name: Checkout
